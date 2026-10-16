@@ -109,7 +109,7 @@ def stage1(names, bench, prov):
 def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_news=True, extra_filings=()):
     errors, f = [], {}
     try:
-        f = prov.fundamentals(sym) or {}
+        f = prov.fundamentals(sym, t.get("price")) or {}
     except Exception as e:
         errors.append(f"fundamentals: {e}")
     headlines, filings = [], list(extra_filings)
