@@ -31,7 +31,7 @@ SECTOR_WORDS = [
     (r"chem|steel|metal|alloy|cement|mining|paper|plastic|polymer|paint|coating", "Basic Materials"),
     (r"auto|motor|vehicle|tyre|ev\b|hotel|travel|retail|fashion|apparel|jewel", "Consumer Cyclical"),
     (r"food|agro|dairy|beverage|fmcg|consumer|personal care", "Consumer Defensive"),
-    (r"infra|engineer|construct|logistic|defen[cs]e|aero|industr|machin|equipment|rail|port|ship", "Industrials"),
+    (r"infra|engineer|construct|logistic|defen[cs]e|aero|industr|machin|equipment|rail|port|ship|manufactur|fabricat", "Industrials"),
     (r"realty|real estate|estate|propert|developer", "Real Estate"),
     (r"telecom|media|entertain|broadcast|communication", "Communication Services"),
 ]
@@ -71,10 +71,13 @@ def nse_ipos() -> list[dict]:
                     continue
                 band = str(x.get("issuePrice") or x.get("priceBand") or "")
                 nums = [float(v) for v in re.findall(r"\d+(?:\.\d+)?", band)]
+                size = _num(x.get("issueSize"))
+                if size and size > 1e5:  # NSE gives the number of shares offered, not rupees
+                    size = round(size * max(nums) / 1e7, 1) if nums else None
                 out.append({"name": name.strip(), "symbol": x.get("symbol"), "status": status,
                             "open": (x.get("issueStartDate") or "")[:11], "close": (x.get("issueEndDate") or "")[:11],
                             "price_high": max(nums) if nums else None, "price_band": band,
-                            "issue_size_cr": _num(x.get("issueSize")),
+                            "issue_size_cr": size,
                             "board": "SME" if "sme" in str(x.get("series") or x.get("isBse") or "").lower() or str(x.get("series")) == "SME" else "Mainboard",
                             "subscription": _num(x.get("noOfTime") or x.get("subscription")), "source": "NSE"})
     except Exception as e:
@@ -148,7 +151,8 @@ def analyse(ipo, details, market, newsp=None):
         "growth": ("Growth (revenue & profit CAGR)", 20, None if rev_g is None and pat_g is None else
                    interp(((rev_g or pat_g) + (pat_g or rev_g)) / 2, [(0, 10), (10, 45), (20, 75), (30, 95)]),
                    f"revenue {rev_g:.0f}%/yr, profit {pat_g:.0f}%/yr" if rev_g is not None and pat_g is not None else None),
-        "profitability": ("Return on net worth", 10, interp(roe, [(0, 0), (10, 35), (15, 60), (22, 90)]) if roe is not None else None,
+        "profitability": ("Return on net worth", 10, interp(roe, [(0, 0), (10, 35), (15, 60), (22, 90)]) if roe is not None else
+                          (0 if pat_last is not None and pat_last <= 0 else None),
                           None if roe is None else f"{roe:.0f}%"),
         "debt": ("Debt / net worth", 5, interp(de, [(0, 100), (0.5, 70), (1, 40), (2, 10)]) if de is not None else None,
                  None if de is None else f"{de:.2f}x"),
@@ -183,8 +187,14 @@ def analyse(ipo, details, market, newsp=None):
             pro.append("Mostly fresh capital going into the business")
     if (ipo.get("board") or "").upper() == "SME":
         con.append("SME board: thin trading, wide price swings, larger minimum lot")
+    pats = [x for x in (ipo.get("pat") or []) if x is not None]
     if pat_last is not None and pat_last <= 0:
-        con.append("Loss-making in the latest year")
+        if len(pats) >= 2 and pats[-1] < pats[-2]:
+            con.append(f"Losses are widening: ₹{abs(pats[-2]):,.0f} Cr → ₹{abs(pats[-1]):,.0f} Cr")
+        else:
+            con.append("Loss-making in the latest year")
+    if rev_g is not None and rev_g >= 20 and (pat_last is None or pat_last <= 0):
+        pro.append(f"Revenue growing fast ({rev_g:.0f}%/yr), but not yet profitable")
     if coverage < 0.5:
         verdict, call = "Not enough data: add prospectus figures in config/ipos.csv", "NEED DATA"
     elif score >= 65:
@@ -201,7 +211,7 @@ def analyse(ipo, details, market, newsp=None):
             pass
     return {**{k: v for k, v in ipo.items() if k not in ("revenue", "pat")}, "sector": sector,
             "revenue": ipo.get("revenue"), "pat": ipo.get("pat"),
-            "score": None if score is None else round(score), "coverage": round(coverage, 2), "call": call,
+            "score": None if score is None or coverage < 0.5 else round(score), "coverage": round(coverage, 2), "call": call,
             "verdict": verdict, "for": pro, "against": con, "peers": peer,
             "params": [{"key": k, "label": v[0], "weight": v[1], "score": None if v[2] is None else round(v[2]), "value": v[3]} for k, v in params.items()],
             "headlines": headlines}
