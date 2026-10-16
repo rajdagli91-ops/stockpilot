@@ -36,6 +36,7 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     env:
       PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
+      LOGIN_USER: ${{ secrets.LOGIN_USER }}
       TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       SMTP_USER: ${{ secrets.SMTP_USER }}
