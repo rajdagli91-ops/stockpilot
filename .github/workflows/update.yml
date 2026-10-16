@@ -45,15 +45,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Find the project folder
+        id: p
+        run: |
+          RUN=$(find . -path ./.git -prune -o -path '*/engine/run.py' -print | head -1)
+          if [ -z "$RUN" ]; then
+            echo "::error::Could not find engine/run.py in this repo. Upload all files from the zip (engine, docs, config folders, requirements.txt)."
+            exit 1
+          fi
+          DIR=$(dirname "$(dirname "$RUN")")
+          echo "Project folder: $DIR"
+          echo "dir=$DIR" >> $GITHUB_OUTPUT
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
       - run: pip install -r requirements.txt
+        working-directory: ${{ steps.p.outputs.dir }}
 
       - name: Load previous results (data branch)
+        working-directory: ${{ steps.p.outputs.dir }}
         run: |
-          mkdir -p docs/data
+          mkdir -p docs/data config
+          # the website saves your encrypted portfolios at the repo's top level
+          if [ -f "$GITHUB_WORKSPACE/config/portfolios.enc.json" ] && [ "$(pwd)" != "$GITHUB_WORKSPACE" ]; then
+            cp "$GITHUB_WORKSPACE/config/portfolios.enc.json" config/
+          fi
           if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
             git clone -q --depth 1 --branch data "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" /tmp/prev
             cp -r /tmp/prev/. docs/data/ && rm -rf docs/data/.git
@@ -75,9 +92,11 @@ jobs:
           esac
 
       - name: Fetch data, score, report
+        working-directory: ${{ steps.p.outputs.dir }}
         run: eval python -m engine.run ${{ steps.m.outputs.args }}
 
       - name: Save results (data branch, single commit, no history growth)
+        working-directory: ${{ steps.p.outputs.dir }}
         run: |
           cd docs/data
           git init -q && git checkout -q -b data
@@ -87,6 +106,7 @@ jobs:
           rm -rf .git
 
       - name: Keep NSE list cache
+        working-directory: ${{ steps.p.outputs.dir }}
         run: |
           git add config/universe_cache.csv 2>/dev/null || true
           if ! git diff --cached --quiet; then
@@ -97,6 +117,6 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs
+          path: ${{ steps.p.outputs.dir }}/docs
       - id: deploy
         uses: actions/deploy-pages@v4
