@@ -21,6 +21,8 @@ def _action(row, weight):
     if sig == "SELL":
         return "EXIT"
     if sig == "BUY":
+        if (row.get("horizon") or {}).get("term") == "Short term":
+            return "SHORT-TERM TRADE" if weight < 0.08 else "HOLD (already large)"
         return "BUY MORE" if weight < 0.08 else "HOLD (already large)"
     if er is not None and er < 12:
         return "HOLD / REVIEW"
@@ -62,6 +64,8 @@ def build(portfolios, rows, details, picks, market, prev, ipos, slot, target=20)
                         "gain_pct": round((x["price"] / x["avg"] - 1) * 100, 1) if x["price"] else None,
                         "signal": r.get("signal"), "score": r.get("overall"), "expected_return": r.get("expected_return"),
                         "action": act, "verdict": pts.get("verdict"),
+                        "horizon": (r.get("horizon") or {}).get("term"), "period": (r.get("horizon") or {}).get("period"),
+                        "horizon_note": (r.get("horizon") or {}).get("note"),
                         "for": (pts.get("for") or [])[:3], "against": (pts.get("against") or [])[:3],
                         "prev_signal": prev_sig.get((p["name"], x["symbol"]))})
         res.sort(key=lambda z: -z["value"])
@@ -92,7 +96,8 @@ def build(portfolios, rows, details, picks, market, prev, ipos, slot, target=20)
     return {"slot": slot, "time": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"),
             "market": {"mood": m.get("mood"), "bias": m.get("bias"),
                        "movers": [{"label": x["label"], "chg_1d": x["chg_1d"]} for x in movers]},
-            "picks": [{"symbol": x["symbol"], "score": x.get("overall"), "expected_return": x.get("expected_return")} for x in picks],
+            "picks": [{"symbol": x["symbol"], "score": x.get("overall"), "expected_return": x.get("expected_return"),
+                       "horizon": (x.get("horizon") or {}).get("term")} for x in picks],
             "ipos": [{"name": x["name"], "call": x["call"], "score": x.get("score"), "open": x.get("open"), "close": x.get("close"),
                       "reason": ((x.get("for") if x["call"] == "APPLY" else x.get("against")) or [x.get("verdict")])[0]} for x in (ipos or [])[:6]],
             "portfolios": out}
@@ -109,7 +114,7 @@ def as_text(rep, site_url=""):
     if m.get("mood") is not None:
         L.append(f"Global mood {m['mood']}/100 ({m['bias']}): " + ", ".join(f"{x['label']} {pc(x['chg_1d'])}" for x in m["movers"]))
     if rep["picks"]:
-        L.append("Top picks: " + ", ".join(f"{x['symbol']} ({x['score']:.0f})" for x in rep["picks"] if x.get("score") is not None))
+        L.append("Top picks: " + ", ".join(f"{x['symbol']} ({x['score']:.0f}, {x.get('horizon') or ''})" for x in rep["picks"] if x.get("score") is not None))
     if rep.get("ipos"):
         L.append("IPOs: " + " | ".join(f"{x['name']} → {x['call']}" + (f" ({x['reason']})" if x.get("reason") else "") for x in rep["ipos"]))
     for p in rep["portfolios"]:
@@ -118,14 +123,16 @@ def as_text(rep, site_url=""):
                  f"expected {pc(p['expected_return'])}/yr" + (f" ({abs(p['gap']):.1f} pts short of target)" if (p['gap'] or 0) < 0 else ""))
         if p["changes"]:
             L.append("Changed: " + ", ".join(f"{c['symbol']} {c['from']}→{c['to']}" for c in p["changes"]))
-        for act in ("EXIT", "BUY MORE", "HOLD / REVIEW"):
+        for act in ("EXIT", "BUY MORE", "SHORT-TERM TRADE", "HOLD / REVIEW"):
             hs = [h for h in p["holdings"] if h["action"] == act]
             if not hs:
                 continue
             L.append(f"{act} ({len(hs)}):")
             for h in hs[:8]:
                 why = (h["against"] if act != "BUY MORE" else h["for"])[:2]
-                L.append(f" • {h['symbol']} {h['weight']:.1f}% · score {h['score'] or '—'}" + (f" — {'; '.join(why)}" if why else ""))
+                L.append(f" • {h['symbol']} {h['weight']:.1f}% · score {h['score'] or '—'}" + (f" · {h['horizon']} ({h['period']})" if h.get('horizon') else "") + (f" — {'; '.join(why)}" if why else ""))
+                if h.get("horizon_note") and act in ("BUY MORE", "SHORT-TERM TRADE", "EXIT"):
+                    L.append(f"   {h['horizon_note']}")
         for a in p["alerts"][:4]:
             L.append(f"! {a}")
     if site_url:
