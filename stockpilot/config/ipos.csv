@@ -1,0 +1,3 @@
+name,symbol,board,open,close,price_band,price_high,issue_size_cr,sector,industry,revenue_fy1,revenue_fy2,revenue_fy3,pat_fy1,pat_fy2,pat_fy3,net_worth_cr,debt_cr,eps_post_issue,ofs_pct,rhp_link
+# Add one row per IPO you want analysed. Money in ₹ crore, EPS in ₹, fy1 = oldest year. Lines starting with # are ignored.
+# Example: Sample Coatings Ltd,,Mainboard,2026-10-20,2026-10-22,₹380-400,400,850,Basic Materials,Paints,620,780,960,48,66,92,540,120,18.5,40,https://www.sebi.gov.in/

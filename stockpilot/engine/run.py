@@ -1,0 +1,435 @@
+"""StockPilot engine.
+
+Modes
+  python -m engine.run full  [--slot "Pre-market"]   whole market: NSE scan + BSE movers/news + global markets + picks
+  python -m engine.run quick [--slot "1 PM"]         your stocks + top candidates + today's BSE news (a few minutes)
+  python -m engine.run portfolio                     only your portfolio stocks (fastest)
+  python -m engine.run symbols INFY TCS              just these stocks
+
+Full-scan funnel:
+  1. Prices for every NSE equity                   -> technicals, liquidity filter
+  2. Fundamentals for liquid stocks                -> scored without news
+  3. News + filings for the best ~30, your stocks, and BSE stocks with major news or a volume spike
+  4. Top 5 picks; your portfolio report (encrypted) sent by Telegram/email if configured
+"""
+import datetime as dt
+import json
+import os
+import sys
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+from engine import ipo as ipo_mod
+from engine import report as rpt
+from engine import scoring, secure, universe
+from engine.providers import bse as bse_p
+from engine.providers import global_mkts
+from engine.providers import news as news_p
+from engine.providers import yahoo
+
+ROOT = Path(__file__).resolve().parent.parent
+OUT = ROOT / "docs" / "data"
+S = scoring.SETTINGS
+SCAN = S["scan"]
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+FIELDS = ["symbol", "name", "sector", "price", "overall", "signal", "confidence", "expected_return",
+          "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event"]
+
+
+def fname(sym):
+    return sym.replace("&", "_") + ".json"
+
+
+def jload(p, default):
+    try:
+        return json.loads(Path(p).read_text())
+    except Exception:
+        return default
+
+
+def jsave(p, obj, compact=True):
+    Path(p).parent.mkdir(parents=True, exist_ok=True)
+    Path(p).write_text(json.dumps(obj, ensure_ascii=False, separators=(",", ":") if compact else None))
+
+
+# ---------------------------------------------------------------- state
+def load_state():
+    j = jload(OUT / "universe.json", None)
+    if j:
+        return {r[0]: dict(zip(j["fields"], r)) for r in j["rows"]}, j.get("meta", {})
+    return {}, {}
+
+
+def save_state(rows, meta, picks):
+    ordered = sorted(rows.values(), key=lambda r: (-(r.get("stage") or 0), -(r.get("overall") or -1)))
+    jsave(OUT / "universe.json", {"meta": meta, "fields": FIELDS, "rows": [[r.get(k) for k in FIELDS] for r in ordered]})
+    jsave(OUT / "picks.json", {"meta": meta, "picks": picks}, compact=False)
+
+
+def load_details():
+    out = {}
+    for p in (OUT / "stocks").glob("*.json") if (OUT / "stocks").exists() else []:
+        d = jload(p, None)
+        if d:
+            out[d["symbol"]] = d
+    return out
+
+
+def load_portfolios():
+    """Decrypt config/portfolios.enc.json with the PORTFOLIO_KEY secret. Returns [] if either is missing."""
+    key, p = os.environ.get("PORTFOLIO_KEY"), ROOT / "config" / "portfolios.enc.json"
+    if not key or not p.exists():
+        return []
+    try:
+        data = secure.decrypt(json.loads(p.read_text()), key)
+        return data.get("portfolios", [])
+    except Exception as e:
+        print(f"Could not decrypt portfolios (check PORTFOLIO_KEY matches the passphrase in Settings): {e}")
+        return []
+
+
+# ---------------------------------------------------------------- analysis
+def liquidity(h):
+    return float((h["Close"] * h["Volume"]).iloc[-20:].mean() / 1e7)  # ₹ crore/day
+
+
+def stage1(names, bench, prov):
+    hists = prov.bulk_history(list(names)) if hasattr(prov, "bulk_history") else {s: prov.history(s) for s in names}
+    out = {}
+    for sym, h in hists.items():
+        if h is None or len(h) < 60:
+            continue
+        t = scoring.technicals(h, bench)
+        out[sym] = ({"symbol": sym, "name": names.get(sym, sym), "price": round(t["price"], 2), "ret_12m": round(t["ret_12m"], 1),
+                     "traded_cr": round(liquidity(h), 2), "stage": 1, "signal": "SCAN", "exchange": "NSE"}, h, t)
+    return out
+
+
+def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_news=True, extra_filings=()):
+    errors, f = [], {}
+    try:
+        f = prov.fundamentals(sym) or {}
+    except Exception as e:
+        errors.append(f"fundamentals: {e}")
+    headlines, filings = [], list(extra_filings)
+    if with_news:
+        try:
+            headlines = newsp.headlines(name)
+        except Exception as e:
+            errors.append(f"news: {e}")
+        if bse_code:
+            try:
+                seen = {x["title"] for x in filings}
+                filings += [x for x in newsp.bse_filings(bse_code) if x["title"] not in seen]
+            except Exception as e:
+                errors.append(f"filings: {e}")
+    tilt = global_mkts.sector_tilt(market, f.get("sector"))
+    why = ((market or {}).get("tilts") or {}).get(f.get("sector") or "", {}).get("why", [])
+    sc = scoring.score_stock(f, t, headlines, filings, {"score": tilt, "why": why} if tilt is not None else None)
+    weekly = []
+    if hist is not None and len(hist):
+        w = hist["Close"].resample("W-FRI").last().dropna().iloc[-104:]
+        weekly = [[d.strftime("%Y-%m-%d"), round(float(v), 2)] for d, v in w.items()]
+    return {"symbol": sym, "name": f.get("name") or name, "sector": f.get("sector"), "industry": f.get("industry"),
+            "price": round(t["price"], 2) if t.get("price") else None, "bse_code": bse_code,
+            "fundamentals": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in f.items()},
+            "technicals": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in t.items()},
+            "headlines": headlines, "filings": filings[:12], "weekly": weekly, "errors": errors,
+            "stage": 3 if with_news else 2, "analysed": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M"), **sc}
+
+
+def row_from(d, base):
+    r = dict(base)
+    r.update({k: d.get(k) for k in ("name", "sector", "price", "overall", "signal", "confidence", "expected_return",
+                                    "fundamental", "technical", "news", "stage")})
+    return r
+
+
+def choose_picks(rows, details):
+    pool = [r for r in rows.values() if r.get("stage") == 3 and r.get("signal") == "BUY"
+            and r.get("confidence") in ("High", "Medium") and (r.get("traded_cr") or 0) >= SCAN["min_traded_cr"]]
+    pool.sort(key=lambda r: -(r["overall"] or 0))
+    picks, sectors = [], {}
+    for r in pool:
+        sec = r.get("sector") or "Other"
+        if sectors.get(sec, 0) >= SCAN["max_picks_per_sector"]:
+            continue
+        d = details.get(r["symbol"]) or {}
+        t = d.get("technicals") or {}
+        picks.append({**r, "strengths": d.get("strengths"), "weaknesses": d.get("weaknesses"), "points": d.get("points"),
+                      "headlines": (d.get("headlines") or [])[:3], "vs_200dma": t.get("vs_200dma"), "rsi": t.get("rsi")})
+        sectors[sec] = sectors.get(sec, 0) + 1
+        if len(picks) == SCAN["top_picks"]:
+            break
+    return picks
+
+
+# ---------------------------------------------------------------- BSE / NSE events
+def exchange_events(mode, nse_isin, bsep, rows):
+    """BSE stocks with major announcements or (full scan) a volume spike. Returns (events, code_of_nse_symbol)."""
+    events, code_of, bse_only = [], {}, {}
+    isin_to_nse = {isin: sym for sym, isin in nse_isin.items() if isin}
+    code_info = {}
+    if mode == "full":
+        try:
+            day, bhav = bsep.latest_bhavcopy()
+            store = jload(OUT / "bse_volumes.json", {})
+            if day and len({d for v in store.values() for d, _ in v}) < 5 and hasattr(bsep, "bhavcopy"):
+                # first run: backfill ~20 trading days so volume spikes can be measured straight away
+                back = day
+                for _ in range(28):
+                    back -= dt.timedelta(days=1)
+                    if back.weekday() >= 5:
+                        continue
+                    try:
+                        old = bsep.bhavcopy(back)
+                    except Exception:
+                        old = []
+                    for r in old:
+                        if r["code"] and r["volume"] is not None:
+                            store.setdefault(r["code"], []).insert(0, [back.isoformat(), r["volume"]])
+                for c in store:
+                    store[c] = sorted({d: v for d, v in store[c]}.items())[-21:]
+                    store[c] = [list(x) for x in store[c]]
+            for r in bhav:
+                code_info[r["code"]] = r
+                if r["isin"] in isin_to_nse:
+                    code_of[isin_to_nse[r["isin"]]] = r["code"]
+            spikes = bsep.volume_spikes(day, bhav, store, SCAN.get("bse_min_turnover_cr", 1), SCAN.get("bse_volume_ratio", 3))
+            jsave(OUT / "bse_volumes.json", store)
+            jsave(OUT / "bse_codes.json", code_of)
+            jsave(OUT / "bse_symbols.json", {c: r["symbol"] for c, r in code_info.items() if r.get("symbol")})
+            for s in spikes[:SCAN.get("bse_max_events", 40)]:
+                sym = isin_to_nse.get(s["isin"]) or f"{s['symbol']}.BO"
+                events.append({"symbol": sym, "name": s["name"], "type": "volume", "exchange": "NSE" if sym in nse_isin else "BSE",
+                               "detail": f"Volume {s['vol_ratio']}× its 20-day average · ₹{(s['turnover'] or 0) / 1e7:.1f} Cr traded",
+                               "date": day.isoformat() if day else "", "link": ""})
+            print(f"BSE: {len(bhav)} stocks in bhavcopy {day}, {len(spikes)} volume spikes")
+        except Exception as e:
+            print(f"BSE bhavcopy skipped: {e}")
+    else:
+        code_of = jload(OUT / "bse_codes.json", {})
+        code_info = {c: {"symbol": t} for c, t in jload(OUT / "bse_symbols.json", {}).items()}
+    try:
+        days = 3 if dt.date.today().weekday() == 0 else 1
+        anns = bsep.announcements(days)
+        major = [a for a in anns if a["major"] or a["red_flag"]]
+        nse_by_code = {c: s for s, c in code_of.items()}
+        for a in major:
+            sym = nse_by_code.get(a["code"])
+            info = code_info.get(a["code"])
+            if not sym:
+                sym = f"{info['symbol']}.BO" if info and info.get("symbol") else None
+            if not sym:
+                continue
+            events.append({"symbol": sym, "name": a["name"], "type": "red_flag" if a["red_flag"] else "news",
+                           "exchange": "NSE" if sym in nse_isin else "BSE", "detail": a["title"], "date": a["date"],
+                           "link": a["link"], "category": a.get("category")})
+        print(f"BSE announcements: {len(anns)} total, {len(major)} major or red-flag")
+    except Exception as e:
+        print(f"BSE announcements skipped: {e}")
+    for a in bsep.nse_announcements():
+        if (a["major"] or a["red_flag"]) and a.get("symbol"):
+            events.append({"symbol": a["symbol"], "name": a["name"], "type": "red_flag" if a["red_flag"] else "news",
+                           "exchange": "NSE", "detail": a["title"], "date": a["date"], "link": a["link"]})
+    return events, code_of
+
+
+# ---------------------------------------------------------------- main
+def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=bse_p, sample=False):
+    started = dt.datetime.now(IST)
+    rows, meta = load_state()
+    details = {} if mode == "full" else load_details()
+    failed = []
+    bench = None
+    try:
+        bench = prov.history(S["benchmark"])
+    except Exception:
+        print("benchmark failed", file=sys.stderr)
+
+    # ---- global markets
+    market = jload(OUT / "market.json", {})
+    try:
+        market = global_mkts.fetch(prov)
+        market["updated"] = dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
+        jsave(OUT / "market.json", market, compact=False)
+        print(f"global mood {market.get('mood')} ({market.get('bias')})")
+    except Exception as e:
+        print(f"global markets skipped: {e}")
+
+    # ---- who to track: watchlist + your (encrypted) portfolios
+    portfolios = load_portfolios()
+    track = {r["symbol"].strip().upper(): r for r in universe.tracked()}
+    for p in portfolios:
+        for h in p.get("holdings", []):
+            track.setdefault(h["symbol"].upper(), {"symbol": h["symbol"], "name": h.get("raw") or h["symbol"]})
+    print(f"tracking {len(track)} stocks from watchlist + {len(portfolios)} portfolios")
+
+    nse = universe.nse_list() if mode == "full" else []
+    nse_isin = {s: i for s, _, i in nse} if nse else {r["symbol"]: "" for r in rows.values() if r.get("exchange") != "BSE"}
+    events, code_of = exchange_events(mode, nse_isin, bsep, rows) if mode in ("full", "quick") else ([], jload(OUT / "bse_codes.json", {}))
+    for sym, r in track.items():
+        if r.get("bse_code"):
+            code_of[sym] = r["bse_code"].strip()
+    event_syms = list(dict.fromkeys(e["symbol"] for e in events if e["type"] in ("news", "volume", "red_flag")))
+    ann_by_sym = {}
+    for e in events:
+        if e["type"] != "volume":
+            ann_by_sym.setdefault(e["symbol"], []).append({"title": e["detail"], "date": e["date"], "link": e["link"],
+                                                            "red_flag": e["type"] == "red_flag", "source": e.get("exchange")})
+
+    hist_of = {}
+    if mode == "full":
+        names = {s: n for s, n, _ in nse} or {s: r.get("name") or s for s, r in track.items()}
+        for s, r in track.items():
+            names.setdefault(s, r.get("name") or s)
+        print(f"stage 1: prices for {len(names)} NSE stocks")
+        s1 = stage1(names, bench, prov)
+        rows = {sym: row for sym, (row, _, _) in s1.items()}
+        liquid = sorted((s for s, (r, _, _) in s1.items() if r["traded_cr"] >= SCAN["min_traded_cr"] and r["price"] >= SCAN["min_price"]),
+                        key=lambda s: -s1[s][0]["traded_cr"])
+        cand2 = list(dict.fromkeys(liquid[:SCAN["max_fundamentals"]] + [s for s in track if s in s1]))
+        print(f"stage 2: fundamentals for {len(cand2)} liquid stocks")
+
+        def do2(sym):
+            row, h, t = s1[sym]
+            try:
+                return sym, full_analysis(sym, row["name"], h, t, prov, newsp, market, with_news=False)
+            except Exception:
+                traceback.print_exc()
+                return sym, None
+
+        with ThreadPoolExecutor(SCAN["workers"]) as ex:
+            for i, (sym, d) in enumerate(ex.map(do2, cand2), 1):
+                if d:
+                    details[sym] = d
+                    rows[sym] = row_from(d, rows[sym])
+                if i % 100 == 0:
+                    print(f"  {i}/{len(cand2)}")
+        ranked = sorted(details, key=lambda s: -(details[s]["overall"] or 0))
+        cand3 = list(dict.fromkeys(ranked[:SCAN["news_candidates"]] + list(track) + event_syms))
+        for s in cand3:
+            if s in s1:
+                hist_of[s] = (s1[s][1], s1[s][2])
+    else:
+        if mode == "symbols":
+            cand3 = [s.strip().upper() for s in (symbols or []) if s.strip()]
+        elif mode == "portfolio":
+            cand3 = list(track)
+        else:
+            prev = sorted((r for r in rows.values() if (r.get("stage") or 0) >= 2), key=lambda r: -(r.get("overall") or 0))
+            cand3 = list(dict.fromkeys(list(track) + [r["symbol"] for r in prev[:SCAN["news_candidates"]]] + event_syms))
+    # prices for anything not already loaded (non-full modes, BSE-only event stocks)
+    for sym in cand3:
+        if sym in hist_of:
+            continue
+        try:
+            h = prov.history(sym)
+            if h is None or len(h) < 60:
+                if sym in track or mode == "symbols":
+                    failed.append(sym)
+                continue
+            t = scoring.technicals(h, bench)
+            hist_of[sym] = (h, t)
+            base = rows.get(sym) or {"symbol": sym, "name": (track.get(sym) or {}).get("name") or sym.replace(".BO", "")}
+            base.update({"price": round(t["price"], 2), "traded_cr": round(liquidity(h), 2), "ret_12m": round(t["ret_12m"], 1),
+                         "exchange": "BSE" if sym.endswith(".BO") else "NSE"})
+            rows[sym] = base
+        except Exception as e:
+            print(f"{sym}: {e}")
+            if sym in track or mode == "symbols":
+                failed.append(sym)
+    cand3 = [s for s in cand3 if s in hist_of]
+
+    print(f"stage 3: news + filings for {len(cand3)} stocks")
+    ev_types = {}
+    for e in events:
+        ev_types.setdefault(e["symbol"], set()).add(e["type"])
+    for sym in cand3:
+        h, t = hist_of[sym]
+        try:
+            name = (rows.get(sym) or {}).get("name") or sym
+            d = full_analysis(sym, name, h, t, prov, newsp, market, code_of.get(sym, ""), True, ann_by_sym.get(sym, []))
+            details[sym] = d
+            rows[sym] = row_from(d, rows.get(sym) or {"symbol": sym})
+            if sym in ev_types:
+                rows[sym]["event"] = ",".join(sorted(ev_types[sym]))
+        except Exception:
+            traceback.print_exc()
+            failed.append(sym)
+
+    sd = OUT / "stocks"
+    sd.mkdir(parents=True, exist_ok=True)
+    if mode == "full":
+        for p in sd.glob("*.json"):
+            p.unlink()
+    for sym, d in details.items():
+        jsave(sd / fname(sym), d)
+
+    # events page: attach the score each event stock got
+    for e in events:
+        r = rows.get(e["symbol"]) or {}
+        e.update({"signal": r.get("signal"), "score": r.get("overall")})
+    if mode == "quick":  # keep this morning's volume spikes (they come from the end-of-day BSE file)
+        seen = {(e["symbol"], e["type"]) for e in events}
+        events += [e for e in jload(OUT / "events.json", {}).get("events", []) if e["type"] == "volume" and (e["symbol"], e["type"]) not in seen]
+    if mode in ("full", "quick"):
+        jsave(OUT / "events.json", {"updated": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"), "events": events[:200]}, compact=False)
+
+    picks = choose_picks(rows, details)
+    ipos = []
+    if mode in ("full", "quick"):
+        try:
+            ipos = ipo_mod.run(details, market, newsp)
+            jsave(OUT / "ipos.json", {"updated": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"), "ipos": ipos}, compact=False)
+            print(f"IPOs analysed: {len(ipos)}")
+        except Exception:
+            traceback.print_exc()
+    else:
+        ipos = jload(OUT / "ipos.json", {}).get("ipos", [])
+    meta.update({
+        "updated": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"), "mode": mode, "slot": slot,
+        "duration_min": round((dt.datetime.now(IST) - started).total_seconds() / 60, 1),
+        "target_cagr": S["target_cagr"], "sample": sample, "failed": failed[:50],
+        "scanned": len(rows), "analysed": sum(1 for r in rows.values() if (r.get("stage") or 0) >= 2),
+        "deep": sum(1 for r in rows.values() if r.get("stage") == 3), "events": len(events),
+        "mood": market.get("mood"), "bias": market.get("bias"),
+        "weights": S["weights"], "thresholds": S["thresholds"], "scan": SCAN,
+    })
+    if mode == "full":
+        meta["last_full_scan"] = meta["updated"]
+    save_state(rows, meta, picks)
+
+    # ---- encrypted portfolio report + delivery
+    key = os.environ.get("PORTFOLIO_KEY")
+    if portfolios and key:
+        hist = []
+        old = jload(OUT / "report.enc.json", None)
+        if old:
+            try:
+                hist = secure.decrypt(old, key).get("history", [])
+            except Exception:
+                hist = []
+        rep = rpt.build(portfolios, rows, details, picks, market, hist[0] if hist else None, ipos,
+                        slot or {"full": "Full scan", "quick": "Update", "portfolio": "Portfolio fetch"}.get(mode, "Update"), S["target_cagr"])
+        hist = [rep] + hist[:14]
+        jsave(OUT / "report.enc.json", secure.encrypt({"history": hist}, key))
+        if slot or os.environ.get("SEND_ALWAYS") == "1":
+            site = os.environ.get("SITE_URL", "")
+            sent = rpt.send(rpt.as_text(rep, site), f"StockPilot {rep['slot']} report · {rep['time']}")
+            print(f"report sent via: {', '.join(sent) or 'nothing configured'}")
+    print(f"done in {meta['duration_min']} min: {len(rows)} stocks, {len(picks)} picks, {len(events)} events, {len(failed)} failed")
+
+
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    slot = None
+    if "--slot" in args:
+        i = args.index("--slot")
+        slot = args[i + 1] if i + 1 < len(args) else None
+        args = args[:i] + args[i + 2:]
+    if args and args[0] in ("full", "quick", "portfolio", "symbols"):
+        main(args[0], args[1:], slot)
+    else:
+        main("symbols" if args else "quick", args, slot)

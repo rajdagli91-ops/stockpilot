@@ -1,0 +1,41 @@
+{
+  "_about": "Model settings. Weights are relative (any numbers). Thresholds are on the 0-100 overall score.",
+  "target_cagr": 20,
+  "max_drawdown_tolerance": 30,
+  "benchmark": "^NSEI",
+  "weights": {
+    "expected_return": 16,
+    "profit_growth": 9,
+    "revenue_growth": 6,
+    "roe": 8,
+    "debt": 5,
+    "valuation": 8,
+    "cash_quality": 4,
+    "trend": 9,
+    "momentum": 8,
+    "rsi": 4,
+    "volatility": 6,
+    "news": 9,
+    "red_flags": 8,
+    "global": 5
+  },
+  "thresholds": {
+    "buy": 66,
+    "sell": 45,
+    "buy_min_hurdle_score": 60,
+    "sell_hurdle_score": 35
+  },
+  "scan": {
+    "_about": "Market scan funnel. traded_cr = average rupees traded per day, in crore.",
+    "min_traded_cr": 2,
+    "min_price": 20,
+    "max_fundamentals": 900,
+    "news_candidates": 30,
+    "top_picks": 5,
+    "max_picks_per_sector": 2,
+    "workers": 4,
+    "bse_min_turnover_cr": 1,
+    "bse_volume_ratio": 3,
+    "bse_max_events": 40
+  }
+}

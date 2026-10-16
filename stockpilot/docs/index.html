@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>StockPilot</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500&display=swap">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <div class="wrap top-in">
+    <a href="#picks" class="brand">Stock<span>Pilot</span></a>
+    <div class="search" role="combobox" aria-expanded="false">
+      <input id="search" type="search" placeholder="Search any stock, sector, or &quot;buy pharma&quot;" autocomplete="off" aria-label="Search stocks">
+      <div id="results" class="results" role="listbox" hidden></div>
+    </div>
+    <nav>
+      <a href="#picks" data-nav="picks">Top picks</a>
+      <a href="#market" data-nav="market">Market</a>
+      <a href="#ipos" data-nav="ipos">IPOs</a>
+      <a href="#screener" data-nav="screener">Screener</a>
+      <a href="#portfolios" data-nav="portfolios">Portfolios</a>
+      <a href="#settings" data-nav="settings">Settings</a>
+    </nav>
+    <div class="fetchbox">
+      <div class="fetchwrap"><button class="btn" id="fetch" aria-haspopup="menu">Fetch ▾</button>
+        <div class="menu" id="fetchmenu" role="menu" hidden>
+          <button data-mode="portfolio" role="menuitem"><b>My portfolios</b><span>Fresh data and analysis for every stock you hold · ~3 min</span></button>
+          <button data-mode="full" role="menuitem"><b>Full market</b><span>All NSE stocks, BSE movers and news, global markets, IPOs, top picks · ~45 min</span></button>
+        </div></div>
+      <div class="runstate"><span id="runstate"></span> <span id="updated"></span></div>
+    </div>
+  </div>
+</header>
+<div class="wrap" id="banner"></div>
+<main class="wrap" id="view"></main>
+<div id="toast" class="toast" role="status" hidden></div>
+<footer class="wrap foot">Rule-based signals built for a 20% CAGR goal, not investment advice. Data: NSE, BSE, Yahoo Finance, Google News.</footer>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
