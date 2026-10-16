@@ -171,3 +171,15 @@ nav a{white-space:nowrap}
 .ipos{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:16px}
 .ipo .big{font-family:var(--display);line-height:1;margin-top:4px}
 td.grp{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);background:var(--soft)}
+
+/* horizon + login */
+.hz{font-size:13px;margin-top:4px}
+.hz b{font-weight:600}
+.pill.NOT{background:var(--soft);color:var(--muted)}
+.pill.SHORTTERM{background:var(--buy-bg);color:var(--buy)}
+body.locked>header,body.locked>main,body.locked>#banner,body.locked>footer{display:none}
+.login{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}
+.login form{width:min(360px,100%);display:flex;flex-direction:column;gap:12px}
+.login label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}
+.login label.inl{flex-direction:row;align-items:center}
+.login .brand{font-size:26px}
