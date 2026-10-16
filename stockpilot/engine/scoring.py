@@ -86,8 +86,8 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
 
     params = {
         # ---- fundamentals
-        "expected_return": ("20% hurdle: expected return", "fundamental",
-                            interp(er, [(0, 0), (8, 15), (12, 35), (16, 60), (20, 80), (26, 100)]), er, "%/yr"),
+        "expected_return": ("Expected return (target 15–18%/yr)", "fundamental",
+                            interp(er, [(0, 0), (8, 15), (12, 35), (15, 60), (18, 80), (24, 100)]), er, "%/yr"),
         "profit_growth": ("Profit growth (3y CAGR)", "fundamental",
                           interp(f.get("profit_cagr"), [(-10, 0), (0, 15), (10, 50), (20, 85), (28, 100)]), f.get("profit_cagr"), "%"),
         "revenue_growth": ("Revenue growth (3y CAGR)", "fundamental",
@@ -127,15 +127,59 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
 
     fund, tech, nws, mkt = group_avg("fundamental"), group_avg("technical"), group_avg("news"), group_avg("market")
     th = s["thresholds"]
+    hz = s["horizons"]
     ers = params["expected_return"][2]
+    red = flags > 0
+    # ---- short-term setup: room to run to a technical target, with a stop-loss
+    st = None
+    price = t.get("price")
+    if price and t.get("dma50") and t.get("from_52w_high") is not None:
+        upside = -t["from_52w_high"]  # % to the 52-week high
+        if upside < 3 and t.get("volatility"):  # at/near the high: a breakout, use a 3-month 1-sigma move
+            upside = t["volatility"] / 2
+        stop = max(t["dma50"] * 0.98, price * (1 - hz["short_term_max_stop_pct"] / 100))
+        if stop >= price:
+            stop = price * (1 - hz["short_term_max_stop_pct"] / 100)
+        risk = (price - stop) / price * 100
+        st = {"upside": round(upside, 1), "target": round(price * (1 + upside / 100), 2), "stop": round(stop, 2),
+              "risk": round(risk, 1), "reward_risk": round(upside / risk, 1) if risk > 0 else None}
+    uptrend = bool(t.get("dma200") and price and t.get("dma50") and price > t["dma50"] > t["dma200"])
+    rsi_ok = t.get("rsi") is not None and 45 <= t["rsi"] <= 70
+    long_ok = (overall is not None and overall >= th["buy"] and er is not None and er >= hz["long_term_min_cagr"]
+               and (fund or 0) >= 55 and not red)
+    short_ok = (st is not None and uptrend and rsi_ok and not red and (tech or 0) >= 65
+                and st["upside"] >= hz["short_term_min_return"] and (st["reward_risk"] or 0) >= 1.5)
     if overall is None:
-        signal = "NO DATA"
-    elif overall >= th["buy"] and (ers is None or ers >= th["buy_min_hurdle_score"]):
+        signal, horizon = "NO DATA", None
+    elif long_ok:
         signal = "BUY"
-    elif overall < th["sell"] or (ers is not None and ers < th["sell_hurdle_score"] and (trend or 50) < 40):
+        strong = er >= hz["long_term_good_cagr"]
+        horizon = {"term": "Long term", "period": "3+ years", "expected": round(er, 1),
+                   "note": f"Expected ~{er:.0f}%/yr" + (" (strong)" if strong else "") + ". Review after each quarterly result."}
+        if t.get("rsi") and t["rsi"] > 70:
+            horizon["note"] += " Overbought now: buy in 2–3 tranches or on a dip."
+    elif short_ok:
+        signal = "BUY"
+        horizon = {"term": "Short term", "period": "1–3 months", "expected": st["upside"], "target": st["target"], "stop": st["stop"],
+                   "note": f"Trade, not an investment: target ₹{st['target']:,.0f} (+{st['upside']:.0f}%), stop-loss ₹{st['stop']:,.0f} (−{st['risk']:.0f}%)."}
+    elif overall < th["sell"] or red or (ers is not None and ers < th["sell_hurdle_score"] and (trend or 50) < 40):
         signal = "SELL"
+        oversold = t.get("rsi") is not None and t["rsi"] < 30
+        horizon = {"term": "Exit", "period": "on a bounce" if oversold else "now",
+                   "note": "Oversold right now (RSI < 30): sell into the next bounce rather than at the low." if oversold
+                   else "Unlikely to reach your return targets; free the money for better ideas."}
     else:
         signal = "HOLD"
+        if er is not None and er >= hz["long_term_min_cagr"]:
+            horizon = {"term": "Long term", "period": "hold 3+ years", "expected": round(er, 1),
+                       "note": "Business is on track for your target; the price/trend isn't ready for fresh buying. Don't add yet."}
+        elif uptrend and (tech or 0) >= 60:
+            horizon = {"term": "Short term", "period": "next 1–3 months", "stop": st["stop"] if st else None,
+                       "note": "Momentum is carrying it, but fundamentals miss your target. Hold with a stop-loss" +
+                               (f" at ₹{st['stop']:,.0f}." if st else ".")}
+        else:
+            horizon = {"term": "Review", "period": "in 3–6 months", "expected": None if er is None else round(er, 1),
+                       "note": f"Expected return {'~' + format(er, '.0f') + '%/yr' if er is not None else 'unclear'} is below your {hz['long_term_min_cagr']}% target. Re-check after next results."}
     if coverage < 0.55:
         conf = "Low"
     elif coverage >= 0.8 and fund is not None and tech is not None and abs(fund - tech) < 20:
@@ -151,9 +195,10 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
         "news": round(nws, 1) if nws is not None else None,
         "signal": signal, "confidence": conf, "coverage": round(coverage, 2),
         "expected_return": round(er, 1) if er is not None else None,
+        "horizon": horizon, "short_term": st,
         "strengths": [v[0] for _, v in ranked[::-1][:2]],
         "weaknesses": [v[0] for _, v in ranked[:2]],
-        "points": action_points(params, signal, er, t, flags, (macro or {}).get("why") or []),
+        "points": action_points(params, signal, er, t, flags, (macro or {}).get("why") or [], horizon),
         "params": [{"key": k, "label": v[0], "group": v[1], "score": None if v[2] is None else round(v[2]),
                     "value": None if v[3] is None else round(float(v[3]), 2), "unit": v[4], "weight": w[k]}
                    for k, v in params.items()],
@@ -166,7 +211,7 @@ def _f(x, d=0):
 
 
 GOOD = {
-    "expected_return": lambda v: f"Expected return about {_f(v)}%/yr clears the 20% target",
+    "expected_return": lambda v: f"Expected return about {_f(v)}%/yr meets your 15–18% long-term target",
     "profit_growth": lambda v: f"Profits have compounded {_f(v)}% a year over 3 years",
     "revenue_growth": lambda v: f"Revenue growing {_f(v)}% a year",
     "roe": lambda v: f"High return on equity ({_f(v)}%): the business earns well on its capital",
@@ -181,7 +226,7 @@ GOOD = {
     "global": lambda v: "Global markets are a tailwind for this sector",
 }
 BAD = {
-    "expected_return": lambda v: f"Expected return only about {_f(v)}%/yr, short of the 20% target",
+    "expected_return": lambda v: f"Expected return only about {_f(v)}%/yr, below your 15% long-term target",
     "profit_growth": lambda v: f"Profit growth weak ({_f(v)}% a year over 3 years)",
     "revenue_growth": lambda v: f"Revenue growth weak ({_f(v)}% a year)",
     "roe": lambda v: f"Low return on equity ({_f(v)}%)",
@@ -198,7 +243,7 @@ BAD = {
 }
 
 
-def action_points(params, signal, er, t, flags, macro_why):
+def action_points(params, signal, er, t, flags, macro_why, horizon=None):
     have = [(k, v) for k, v in params.items() if v[2] is not None and v[3] is not None]
     good = sorted([(k, v) for k, v in have if v[2] >= 70 and k in GOOD], key=lambda kv: -kv[1][2] * SETTINGS["weights"].get(kv[0], 1))
     bad = sorted([(k, v) for k, v in have if v[2] <= 35 and k in BAD], key=lambda kv: kv[1][2] / max(SETTINGS["weights"].get(kv[0], 1), 1))
@@ -206,14 +251,18 @@ def action_points(params, signal, er, t, flags, macro_why):
     con = [BAD[k](v[3]) for k, v in bad[:4]]
     if macro_why:
         (pro if (params["global"][2] or 50) >= 50 else con).append("Global: " + "; ".join(macro_why[:2]))
+    h = horizon or {}
+    label = {"BUY": "Buy", "SELL": "Exit", "HOLD": "Hold"}.get(signal, "No call")
+    verdict = f"{label} · {h.get('term', '')} ({h.get('period', '')})" if h else label
+    if h.get("note"):
+        verdict += f": {h['note']}"
+    # for stocks you don't own, Hold/Exit make no sense: say whether it is a buy or not
     if signal == "BUY":
-        verdict = "Buy: quality and price both line up with the 20% goal"
-        if t.get("rsi") and t["rsi"] > 70:
-            verdict = "Buy on dips: strong stock, but stretched right now"
+        verdict_new = verdict
     elif signal == "SELL":
-        verdict = "Exit / avoid: unlikely to compound at 20% from here"
+        verdict_new = "Not a buy: fails your return targets" + (f" ({con[0]})" if con else "")
     elif signal == "HOLD":
-        verdict = "Hold: decent, but not strong enough to add fresh money"
+        verdict_new = "Not a buy yet" + (f": {h['note']}" if h.get("note") else "")
     else:
-        verdict = "Not enough data to call"
-    return {"verdict": verdict, "for": pro, "against": con}
+        verdict_new = "Not enough data to call"
+    return {"verdict": verdict, "verdict_new": verdict_new, "for": pro, "against": con}
