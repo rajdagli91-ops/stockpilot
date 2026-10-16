@@ -31,7 +31,19 @@ const scoreColor = v => v == null ? 'var(--nodata)' : v >= 66 ? 'var(--buy)' : v
 const bar = v => `<div class="bar"><i><b style="width:${v ?? 0}%;background:${scoreColor(v)}"></b></i><span>${v == null ? '—' : Math.round(v)}</span></div>`;
 const norm = s => String(s || '').toUpperCase().replace(/LIMITED|LTD\.?|\bEQ\b|EQUITY|\(I\)|INDIA|&|[^A-Z0-9]/g, '');
 const fileOf = sym => 'data/stocks/' + encodeURIComponent(sym.replace(/&/g, '_')) + '.json';
-const target = () => META.target_cagr || 20;
+const target = () => META.target_cagr || 18;
+const heldSet = () => new Set(portfolios.flatMap(p => p.holdings.map(h => h.symbol)));
+// Hold / Exit only make sense for stocks you own; anything else is Buy or Not a buy.
+const sigLabel = (sym, sig) => !sig || sig === 'SCAN' || sig === 'NO DATA' ? (sig || 'NO DATA') : sig === 'BUY' ? 'BUY' : heldSet().has(sym) ? (sig === 'SELL' ? 'EXIT' : 'HOLD') : 'NOT A BUY';
+const hzText = h => h ? `${h.term} · ${h.period}` : '';
+const hzLine = h => {
+  if (!h) return '';
+  const bits = [];
+  if (h.expected != null && h.term !== 'Exit') bits.push((h.term === 'Short term' ? 'upside ' : 'expected ') + pc(h.expected) + (h.term === 'Short term' ? '' : '/yr'));
+  if (h.target) bits.push('target ₹' + n(h.target, f0));
+  if (h.stop) bits.push('stop-loss ₹' + n(h.stop, f0));
+  return `<div class="hz"><b>${esc(hzText(h))}</b>${bits.length ? ' · ' + esc(bits.join(' · ')) : ''}</div>`;
+};
 const stageLabel = s => ({ 1: 'Price scan only', 2: 'Fundamentals + technicals', 3: 'Full: + news & filings' }[s] || 'Not analysed');
 function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 6000); }
 
@@ -192,7 +204,7 @@ function setupSearch() {
     const looksSym = /^[A-Z0-9&-]{2,20}$/.test(q);
     const exact = items.some(r => r.symbol.startsWith(q)) || items.some(r => (r.name || '').toUpperCase().startsWith(q));
     box.innerHTML = items.map((r, i) => `<a href="#stock/${encodeURIComponent(r.symbol)}" class="res ${i === idx ? 'on' : ''}" role="option">
-        <b>${esc(r.symbol)}</b><span class="nm">${esc(r.name || '')}</span>${r.stage >= 2 ? pill(r.signal) + `<span class="sc">${Math.round(r.overall ?? 0)}</span>` : '<span class="muted" style="font-size:12px">scan only</span>'}</a>`).join('')
+        <b>${esc(r.symbol)}</b><span class="nm">${esc(r.name || '')}</span>${r.stage >= 2 ? pill(sigLabel(r.symbol, r.signal)) + `<span class="sc">${Math.round(r.overall ?? 0)}</span>` : '<span class="muted" style="font-size:12px">scan only</span>'}</a>`).join('')
       + (q && !exact && looksSym ? `<a href="#stock/${encodeURIComponent(q)}" class="res ${idx === items.length ? 'on' : ''}"><b>${esc(q)}</b><span class="nm">Analyse this symbol</span></a>` : '')
       + (inp.value.trim() && !items.length && !looksSym ? '<div class="res muted">No match. Try a symbol, company name, sector, or "buy banking".</div>' : '');
     box.hidden = !box.innerHTML;
@@ -242,9 +254,9 @@ function dailyReport(p) {
   const changes = Object.entries(cur).filter(([k, v]) => sn.prev && sn.prev[k] && sn.prev[k] !== v).map(([k, v]) => ({ sym: k, from: sn.prev[k], to: v }));
   const acts = [];
   const sells = st.rows.filter(r => r.s?.stage >= 2 && r.s.signal === 'SELL').sort((a, b) => b.w - a.w);
-  if (sells.length) acts.push(['bad', `${sells.length} holdings rated SELL (${(sells.reduce((a, r) => a + r.w, 0) * 100).toFixed(1)}% of value)`, sells.slice(0, 8).map(r => r.symbol)]);
+  if (sells.length) acts.push(['bad', `${sells.length} holdings rated EXIT (${(sells.reduce((a, r) => a + r.w, 0) * 100).toFixed(1)}% of value)`, sells.slice(0, 8).map(r => r.symbol)]);
   const weak = st.rows.filter(r => r.s?.expected_return != null && r.s.expected_return < 12 && r.s.signal !== 'SELL').sort((a, b) => b.w - a.w);
-  if (weak.length) acts.push(['warn', `${weak.length} holdings expected to return under 12%/yr, well short of ${target()}%`, weak.slice(0, 8).map(r => r.symbol)]);
+  if (weak.length) acts.push(['warn', `${weak.length} holdings expected to return under 12%/yr, below your 15% long-term target`, weak.slice(0, 8).map(r => r.symbol)]);
   const big = st.rows.filter(r => r.w > 0.10);
   if (big.length) acts.push(['warn', 'Single stocks above 10% of the portfolio', big.map(r => `${r.symbol} ${(r.w * 100).toFixed(0)}%`)]);
   const tiny = st.rows.filter(r => r.w < 0.01);
@@ -277,7 +289,7 @@ async function cloudSaveIfDirty() { if (cloudReady() && LS.get('pfUpdated', 0) >
 function actionFor(row, weight) {
   if (!row || (row.stage || 0) < 2 || !row.signal || row.signal === 'SCAN') return 'NOT ANALYSED';
   if (row.signal === 'SELL') return 'EXIT';
-  if (row.signal === 'BUY') return weight < 0.08 ? 'BUY MORE' : 'HOLD (already large)';
+  if (row.signal === 'BUY') return weight >= 0.08 ? 'HOLD (already large)' : row.horizon?.term === 'Short term' ? 'SHORT-TERM TRADE' : 'BUY MORE';
   if (row.expected_return != null && row.expected_return < 12) return 'HOLD / REVIEW';
   return 'HOLD';
 }
@@ -306,6 +318,7 @@ function viewPicks() {
       <div class="pick">
         <a class="ph" href="#stock/${encodeURIComponent(x.symbol)}"><div><span class="rank">#${i + 1}</span> <b class="sym">${esc(x.symbol)}</b><div class="muted nm">${esc(x.name || '')}</div></div><div class="big" style="color:${scoreColor(x.overall)}">${Math.round(x.overall)}</div></a>
         <div class="pm">${pill(x.signal)} <span class="hint">${esc(x.confidence)} confidence · ${esc(x.sector || '')}</span></div>
+        ${hzLine(x.horizon)}
         <dl><dt>Expected return</dt><dd class="${x.expected_return >= target() ? 'pos' : ''}">${pc(x.expected_return)}/yr</dd>
             <dt>12 months</dt><dd>${pc(x.ret_12m)}</dd><dt>vs 200-day avg</dt><dd>${pc(x.vs_200dma)}</dd><dt>RSI</dt><dd>${n(x.rsi, f0)}</dd></dl>
         ${pointsHtml(x.points, true)}
@@ -328,7 +341,7 @@ function viewScreener() {
     <div><h1>Screener</h1><p class="sub">Every analysed stock. Filter here, or use the search bar for any symbol.</p></div>
     <div class="tools">
       <input id="sq" type="search" placeholder="Filter by name" value="${esc(sc.q)}" style="flex:1 1 180px" aria-label="Filter by name">
-      <select id="ssig" aria-label="Signal"><option value="">All signals</option>${['BUY', 'HOLD', 'SELL'].map(s => `<option ${sc.sig === s ? 'selected' : ''}>${s}</option>`).join('')}</select>
+      <select id="ssig" aria-label="Signal"><option value="">All stocks</option>${[['BUY', 'Buy (any term)'], ['BUYL', 'Buy · long term'], ['BUYS', 'Buy · short term'], ['NOT', 'Not a buy'], ['MINE', 'In my portfolios']].map(([v, l]) => `<option value="${v}" ${sc.sig === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <select id="ssec" aria-label="Sector"><option value="">All sectors</option>${sectors.map(s => `<option ${sc.sector === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
       <label class="hint inl">Min score <input id="smin" type="number" min="0" max="100" value="${sc.min}" style="width:70px"></label>
       <label class="hint inl"><input id="sdeep" type="checkbox" ${sc.deep ? 'checked' : ''}> Analysed only</label>
@@ -339,11 +352,13 @@ function viewScreener() {
     </tr></thead><tbody></tbody></table></div><p class="hint" id="scount"></p>`;
   const draw = () => {
     const q = sc.q.toLowerCase();
-    const rows = ROWS.filter(r => (!sc.deep || r.stage >= 2) && (!sc.sig || r.signal === sc.sig) && (!sc.sector || r.sector === sc.sector) && (!sc.min || (r.overall || 0) >= sc.min) && (!q || `${r.symbol} ${r.name}`.toLowerCase().includes(q)))
+    const mine = heldSet();
+    const sigOk = r => !sc.sig || (sc.sig === 'BUY' ? r.signal === 'BUY' : sc.sig === 'BUYL' ? r.signal === 'BUY' && r.horizon?.term === 'Long term' : sc.sig === 'BUYS' ? r.signal === 'BUY' && r.horizon?.term === 'Short term' : sc.sig === 'NOT' ? r.signal !== 'BUY' : mine.has(r.symbol));
+    const rows = ROWS.filter(r => (!sc.deep || r.stage >= 2) && sigOk(r) && (!sc.sector || r.sector === sc.sector) && (!sc.min || (r.overall || 0) >= sc.min) && (!q || `${r.symbol} ${r.name}`.toLowerCase().includes(q)))
       .sort((a, b) => { const x = a[sc.key], y = b[sc.key]; if (x == null) return 1; if (y == null) return -1; return (typeof x === 'string' ? x.localeCompare(y) : x - y) * sc.dir; });
     $('#st tbody').innerHTML = rows.slice(0, 300).map(r => `<tr class="click" data-s="${esc(r.symbol)}">
       <td><b>${esc(r.symbol)}</b><div class="muted" style="font-size:12px">${esc((r.name || '').slice(0, 30))}</div></td>
-      <td>${r.stage >= 2 ? pill(r.signal) : '<span class="muted">scan</span>'}</td><td>${bar(r.overall)}</td>
+      <td>${r.stage >= 2 ? pill(sigLabel(r.symbol, r.signal)) + (r.horizon && r.signal === 'BUY' ? `<div class="hint">${esc(hzText(r.horizon))}</div>` : '') : '<span class="muted">scan</span>'}</td><td>${bar(r.overall)}</td>
       <td class="hide-sm">${bar(r.fundamental)}</td><td class="hide-sm">${bar(r.technical)}</td>
       <td class="num ${r.expected_return >= target() ? 'pos' : r.expected_return < 12 ? 'neg' : ''}">${pc(r.expected_return)}</td>
       <td class="num hide-sm ${r.ret_12m >= 0 ? 'pos' : 'neg'}">${pc(r.ret_12m)}</td><td class="num hide-sm">${n(r.traded_cr, f0)}</td><td class="num hide-sm">${n(r.price)}</td></tr>`).join('') || '<tr><td colspan="9" class="empty">No stocks match.</td></tr>';
@@ -439,14 +454,14 @@ async function viewStock(sym) {
       <p class="sub">${esc(d.sector || '')}${d.industry ? ' · ' + esc(d.industry) : ''} · ₹${n(d.price)} · ${stageLabel(d.stage)} · analysed ${esc(d.analysed || '')}</p></div>
     <div class="card verdict">
       <div class="big" style="color:${scoreColor(d.overall)}">${d.overall ?? '—'}</div>
-      <div><div class="sig">${pill(d.signal)}</div><div class="hint" style="margin-top:6px">Confidence <b>${esc(d.confidence)}</b> · data coverage ${Math.round((d.coverage || 0) * 100)}%</div></div>
-      <div style="flex:1 1 260px;min-width:0"><div class="hint">Expected return vs your ${target()}% target</div>
+      <div><div class="sig">${pill(sigLabel(d.symbol, d.signal))}</div>${d.signal === 'BUY' || h ? hzLine(d.horizon) : ''}<div class="hint" style="margin-top:6px">Confidence <b>${esc(d.confidence)}</b> · data coverage ${Math.round((d.coverage || 0) * 100)}%</div></div>
+      <div style="flex:1 1 260px;min-width:0"><div class="hint">Expected return vs your 15–18% target</div>
         <div class="mono ${d.expected_return >= target() ? 'pos' : 'neg'}" style="font-size:22px">${pc(d.expected_return)} / yr</div>
         <div class="hint">Strong: ${esc((d.strengths || []).join(', '))}<br>Weak: ${esc((d.weaknesses || []).join(', '))}</div></div>
       <button class="btn ghost" id="analyse">Refresh analysis</button>
     </div>
     ${h ? `<div class="banner" style="margin:0">You hold ${n(h.qty, f0)} shares at ₹${n(h.avg)} · P&L ${pc(d.price && h.avg ? (d.price / h.avg - 1) * 100 : null)} · Action: ${pill(actionFor(BY.get(d.symbol) || d, 0))}</div>` : ''}
-    <div class="card"><h2>Buy, hold or exit: the reasons</h2>${pointsHtml(d.points) || '<p class="muted">No reasons yet.</p>'}</div>
+    <div class="card"><h2>${h ? 'Buy more, hold or exit' : 'Buy or not'}: the reasons</h2>${pointsHtml(d.points ? { ...d.points, verdict: h ? d.points.verdict : (d.points.verdict_new || d.points.verdict) } : null) || '<p class="muted">No reasons yet.</p>'}</div>
     <div class="grid2">
       <div class="card"><h2>Parameter ratings</h2><p class="sub">Each rated 0–100. ×weight shows how much it counts.</p>
         <div class="params" style="margin-top:12px">${Object.entries(groups).map(([g, label]) => `<div class="grp">${label}</div>` +
@@ -546,11 +561,11 @@ function viewPortfolios() {
     .sort((a, b) => { const x = a[pfSort.key], y = b[pfSort.key]; if (x == null || x === '') return 1; if (y == null || y === '') return -1; return (typeof x === 'string' ? x.localeCompare(y) : x - y) * pfSort.dir; });
   $('#pt tbody').innerHTML = rows.length ? rows.map(r => `<tr class="click" data-s="${esc(r.symbol)}">
     <td><b>${esc(r.symbol)}</b>${r.raw && r.raw !== r.symbol ? `<div class="muted" style="font-size:12px">${esc(r.raw)}</div>` : ''}</td>
-    <td>${r.signal ? pill(r.signal) : '<span class="muted">not analysed</span>'}</td><td>${bar(r.score)}</td>
+    <td>${r.signal ? pill(sigLabel(r.symbol, r.signal)) : '<span class="muted">not analysed</span>'}</td><td>${bar(r.score)}</td>
     <td class="num hide-sm">${n(r.qty, f0)}</td><td class="num hide-sm">${n(r.avg)}</td><td class="num hide-sm">${r.priced ? n(r.px) : '—'}</td>
     <td class="num">${inr(r.val)}</td><td class="num">${(r.w * 100).toFixed(1)}%</td><td class="num hide-sm">${pc(r.er)}</td>
     <td class="num ${r.gainp >= 0 ? 'pos' : 'neg'}">${pc(r.gainp)}</td>
-    <td>${pill(r.action)}</td>
+    <td>${pill(r.action)}${r.s?.horizon ? `<div class="hint">${esc(hzText(r.s.horizon))}</div>` : ''}</td>
     <td><button class="btn ghost small" data-del="${esc(r.symbol)}" aria-label="Remove ${esc(r.symbol)}">✕</button></td></tr>`).join('')
     : '<tr><td colspan="12" class="empty">No holdings yet. Add one above or upload your broker file.</td></tr>';
 
@@ -624,7 +639,7 @@ async function renderReports() {
       ${r.portfolios.map(p => `<div class="rep"><h3>${esc(p.name)}</h3>
         <p class="hint">${inr(p.value)} · ${pc(p.gain_pct)} on cost · health ${p.health ?? '—'}/100 · expected ${pc(p.expected_return)}/yr${p.gap < 0 ? ` (${Math.abs(p.gap).toFixed(1)} pts short of ${target()}%)` : ''}</p>
         ${p.changes.length ? `<p class="hint"><b>Changed:</b> ${p.changes.map(c => `${esc(c.symbol)} ${esc(c.from)} → ${esc(c.to)}`).join(', ')}</p>` : ''}
-        ${['EXIT', 'BUY MORE', 'HOLD / REVIEW', 'HOLD', 'HOLD (already large)', 'NOT ANALYSED'].map(a => { const hs = p.holdings.filter(h => h.action === a); return hs.length ? `<div class="repgrp"><div>${pill(a)} <span class="hint">${hs.length}</span></div><ul>${hs.map(h => `<li><a href="#stock/${encodeURIComponent(h.symbol)}">${esc(h.symbol)}</a> <span class="muted">${h.weight.toFixed(1)}% · score ${h.score ?? '—'}</span>${(a === 'BUY MORE' ? h.for : h.against).length ? ' — ' + esc((a === 'BUY MORE' ? h.for : h.against).slice(0, 2).join('; ')) : ''}</li>`).join('')}</ul></div>` : ''; }).join('')}
+        ${['EXIT', 'BUY MORE', 'SHORT-TERM TRADE', 'HOLD / REVIEW', 'HOLD', 'HOLD (already large)', 'NOT ANALYSED'].map(a => { const hs = p.holdings.filter(h => h.action === a); return hs.length ? `<div class="repgrp"><div>${pill(a)} <span class="hint">${hs.length}</span></div><ul>${hs.map(h => `<li><a href="#stock/${encodeURIComponent(h.symbol)}">${esc(h.symbol)}</a> <span class="muted">${h.weight.toFixed(1)}% · score ${h.score ?? '—'}${h.horizon ? ' · ' + esc(h.horizon + ' (' + h.period + ')') : ''}</span>${(a === 'BUY MORE' ? h.for : h.against).length ? ' — ' + esc((a === 'BUY MORE' ? h.for : h.against).slice(0, 2).join('; ')) : ''}</li>`).join('')}</ul></div>` : ''; }).join('')}
         ${p.alerts.length ? `<ul class="acts">${p.alerts.map(x => `<li class="warn"><span class="dot"></span><div>${esc(x)}</div></li>`).join('')}</ul>` : ''}</div>`).join('')}`;
     box.querySelectorAll('[data-i]').forEach(b => b.addEventListener('click', () => { sel = +b.dataset.i; draw(); }));
   };
@@ -652,7 +667,7 @@ function viewMarket() {
       ${EVENTS.length ? `<div class="tbox"><table><thead><tr><th>Stock</th><th>What happened</th><th>Signal</th><th class="hide-sm">Date</th></tr></thead><tbody>
         ${EVENTS.map(e => `<tr class="click" data-s="${esc(e.symbol)}"><td><b>${esc(e.symbol)}</b><div class="muted" style="font-size:12px">${esc((e.name || '').slice(0, 28))} · ${esc(e.exchange || '')}</div></td>
           <td style="white-space:normal;min-width:220px"><span class="pill ${e.type === 'red_flag' ? 'SELL' : e.type === 'volume' ? 'HOLD' : 'BUY'}">${evIcon(e.type)}</span> ${e.link ? `<a href="${esc(e.link)}" target="_blank" rel="noopener">${esc(e.detail)}</a>` : esc(e.detail)}</td>
-          <td>${e.signal ? pill(e.signal) + ' <span class="muted">' + (e.score != null ? Math.round(e.score) : '') + '</span>' : '—'}</td><td class="hide-sm muted">${esc(e.date || '')}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No major announcements or volume spikes in the latest run.</p>'}
+          <td>${e.signal ? pill(sigLabel(e.symbol, e.signal)) + ' <span class="muted">' + (e.score != null ? Math.round(e.score) : '') + '</span>' : '—'}</td><td class="hide-sm muted">${esc(e.date || '')}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted">No major announcements or volume spikes in the latest run.</p>'}
     </div>`;
   v.querySelectorAll('tr[data-s]').forEach(tr => tr.addEventListener('click', e => { if (!e.target.closest('a')) location.hash = 'stock/' + encodeURIComponent(tr.dataset.s); }));
 }
@@ -692,6 +707,7 @@ function viewSettings() {
       </div>
       <div class="tools" style="margin-top:12px"><button class="btn" id="ghsave">Save</button><button class="btn ghost" id="ghtest">Test connection</button><button class="btn ghost" id="fullscan">Run full market scan</button><span class="hint" id="ghmsg"></span></div>
     </div>
+    <div class="card"><div class="cardhead"><h2>Sign-in</h2><button class="btn ghost small" id="signout">Sign out</button></div><p class="sub">User ID is set by the GitHub secret <code>LOGIN_USER</code>; the password is your portfolio passphrase (<code>PORTFOLIO_KEY</code>). Signing out removes them from this device.</p></div>
     <div class="card"><h2>Portfolio passphrase</h2>
       <p class="sub">Encrypts your portfolios before they're saved to GitHub, and decrypts your reports. Put the <b>same passphrase</b> in GitHub: repo → Settings → Secrets and variables → Actions → New secret named <code>PORTFOLIO_KEY</code>. If you forget it, the cloud copy can't be recovered (your browser copy is unaffected).</p>
       <div class="row" style="margin-top:14px"><label>Passphrase<input id="pass" type="password" value="${esc(settings.pass)}" autocomplete="new-password" placeholder="at least 12 characters"></label></div>
@@ -720,13 +736,45 @@ function viewSettings() {
   $('#ghsave').addEventListener('click', () => { readGh(); $('#ghmsg').textContent = 'Saved'; });
   $('#ghtest').addEventListener('click', async () => { readGh(); try { const r = await gh(''); $('#ghmsg').textContent = 'Connected to ' + r.full_name; } catch (e) { $('#ghmsg').textContent = e.message; } });
   $('#fullscan').addEventListener('click', () => { readGh(); dispatch('full'); });
+  $('#signout').addEventListener('click', signOut);
   $('#psave').addEventListener('click', async () => { const pw = $('#pass').value; if (pw && pw.length < 12) { $('#pmsg').textContent = 'Use at least 12 characters.'; return; } settings.pass = pw; saveSettings(); REPORTS = null; $('#pmsg').textContent = 'Saved'; if (cloudReady() && await cloudLoad()) toast('Loaded newer portfolios from cloud.'); });
   $('#save').addEventListener('click', () => { settings.key = $('#key').value.trim(); settings.model = $('#model').value.trim() || 'claude-haiku-5-5'; settings.maxTokens = +$('#maxt').value || 350; saveSettings(); $('#saved').textContent = 'Saved'; });
   $('#clear').addEventListener('click', () => { settings.key = ''; saveSettings(); viewSettings(); });
 }
 
 // ================================================================ boot
+// ---------------- login: username + passphrase, checked by decrypting data/lock.enc.json
+async function unlock() {
+  const auth = LS.get('auth', null);
+  let lock = null;
+  try { const r = await fetch('data/lock.enc.json?t=' + Date.now(), { cache: 'no-cache' }); if (r.ok) lock = await r.json(); } catch { }
+  const check = async (user, pass) => {
+    if (!lock) return { ok: true, firstRun: true };
+    try { const d = await decryptObj(lock, pass); return { ok: d.ok === true && (!d.user || d.user.toLowerCase() === user.toLowerCase()) }; } catch { return { ok: false }; }
+  };
+  if (auth && (await check(auth.user, auth.pass)).ok && Date.now() - (auth.at || 0) < 30 * 864e5) { if (!settings.pass) { settings.pass = auth.pass; saveSettings(); } return; }
+  document.body.classList.add('locked');
+  const box = document.createElement('div'); box.className = 'login';
+  box.innerHTML = `<form class="card" id="loginf"><div class="brand">Stock<span>Pilot</span></div><h2>Sign in</h2>
+    <label>User ID<input id="lu" autocomplete="username" required></label>
+    <label>Password<input id="lp" type="password" autocomplete="current-password" required></label>
+    <label class="inl hint"><input type="checkbox" id="lr" checked> Keep me signed in on this device for 30 days</label>
+    <button class="btn">Sign in</button><p class="hint" id="lmsg"></p>
+    <p class="hint">${lock ? 'Password is your portfolio passphrase.' : 'First run: the login activates after the next scheduled run creates it.'}</p></form>`;
+  document.body.appendChild(box);
+  await new Promise(done => $('#loginf').addEventListener('submit', async e => {
+    e.preventDefault(); const user = $('#lu').value.trim(), pass = $('#lp').value;
+    $('#lmsg').textContent = 'Checking…';
+    const r = await check(user, pass);
+    if (!r.ok) { $('#lmsg').textContent = 'Wrong user ID or password.'; return; }
+    if ($('#lr').checked) LS.set('auth', { user, pass, at: Date.now() }); else LS.set('auth', null);
+    settings.pass = pass; saveSettings(); box.remove(); document.body.classList.remove('locked'); done();
+  }));
+}
+function signOut() { LS.set('auth', null); settings.pass = ''; saveSettings(); location.reload(); }
+
 (async function boot() {
+  await unlock();
   setupSearch();
   const menu = $('#fetchmenu');
   $('#fetch').addEventListener('click', e => { e.stopPropagation(); menu.hidden = !menu.hidden; });
