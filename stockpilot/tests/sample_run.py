@@ -31,7 +31,7 @@ class FakeProv:
         return pd.DataFrame({"Close": px, "Volume": r.integers(1e4, 2e6, n)}, index=pd.bdate_range(end="2026-10-16", periods=n))
 
     @staticmethod
-    def fundamentals(sym):
+    def fundamentals(sym, price=None):
         r = _rng(sym + "f")
         return {"name": None, "sector": str(r.choice(["Financial Services", "Technology", "Energy", "Industrials", "Healthcare", "Basic Materials"])),
                 "industry": "Sample", "pe": float(r.uniform(5, 60)), "pb": float(r.uniform(0.8, 8)), "roe": float(r.uniform(4, 30)),
