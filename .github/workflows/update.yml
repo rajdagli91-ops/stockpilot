@@ -1,0 +1,102 @@
+name: Update scores
+
+on:
+  schedule:
+    # GitHub can start scheduled runs 10-30 min late, so each is set early.
+    - cron: "45 1 * * 1-5"   # 07:15 IST  Pre-market: full market scan, report by ~08:45
+    - cron: "15 7 * * 1-5"   # 12:45 IST  1 PM update
+    - cron: "15 9 * * 1-5"   # 14:45 IST  3 PM update
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "portfolio = your stocks (~3 min), quick = your stocks + top candidates + today's news (~5 min), full = whole market (~45 min), symbols = only the symbols below"
+        type: choice
+        options: [portfolio, quick, full, symbols]
+        default: portfolio
+      symbols:
+        description: "For mode=symbols: space-separated NSE symbols, e.g. INFY TCS"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: update-scores
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    env:
+      PORTFOLIO_KEY: ${{ secrets.PORTFOLIO_KEY }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      REPORT_EMAIL: ${{ secrets.REPORT_EMAIL }}
+      SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Load previous results (data branch)
+        run: |
+          mkdir -p docs/data
+          if git ls-remote --exit-code --heads origin data >/dev/null 2>&1; then
+            git clone -q --depth 1 --branch data "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" /tmp/prev
+            cp -r /tmp/prev/. docs/data/ && rm -rf docs/data/.git
+          fi
+
+      - name: Choose mode
+        id: m
+        env:
+          SYMS: ${{ github.event.inputs.symbols }}
+          MODE: ${{ github.event.inputs.mode }}
+        run: |
+          SYMS=$(printf '%s' "$SYMS" | tr -cd 'A-Za-z0-9&. -')
+          case "$MODE" in full|quick|portfolio|symbols) ;; *) MODE=portfolio ;; esac
+          case "${{ github.event.schedule }}" in
+            "45 1 * * 1-5") echo "args=full --slot Pre-market" >> $GITHUB_OUTPUT ;;
+            "15 7 * * 1-5") echo "args=quick --slot '1 PM'" >> $GITHUB_OUTPUT ;;
+            "15 9 * * 1-5") echo "args=quick --slot '3 PM'" >> $GITHUB_OUTPUT ;;
+            *) echo "args=$MODE $SYMS" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Fetch data, score, report
+        run: eval python -m engine.run ${{ steps.m.outputs.args }}
+
+      - name: Save results (data branch, single commit, no history growth)
+        run: |
+          cd docs/data
+          git init -q && git checkout -q -b data
+          git add -A
+          git -c user.name=stockpilot-bot -c user.email=stockpilot-bot@users.noreply.github.com commit -qm "data $(date -u +%F_%H%M)"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" data
+          rm -rf .git
+
+      - name: Keep NSE list cache
+        run: |
+          git add config/universe_cache.csv 2>/dev/null || true
+          if ! git diff --cached --quiet; then
+            git -c user.name=stockpilot-bot -c user.email=stockpilot-bot@users.noreply.github.com commit -qm "Update NSE list cache"
+            git pull -q --rebase && git push -q || echo "cache push skipped"
+          fi
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs
+      - id: deploy
+        uses: actions/deploy-pages@v4
