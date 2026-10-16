@@ -108,9 +108,9 @@ jobs:
       - name: Keep NSE list cache
         working-directory: ${{ steps.p.outputs.dir }}
         run: |
-          git add config/universe_cache.csv 2>/dev/null || true
+          git add config/universe_cache.csv config/sectors.csv 2>/dev/null || true
           if ! git diff --cached --quiet; then
-            git -c user.name=stockpilot-bot -c user.email=stockpilot-bot@users.noreply.github.com commit -qm "Update NSE list cache"
+            git -c user.name=stockpilot-bot -c user.email=stockpilot-bot@users.noreply.github.com commit -qm "Update NSE stock and sector lists"
             git pull -q --rebase && git push -q || echo "cache push skipped"
           fi
 
