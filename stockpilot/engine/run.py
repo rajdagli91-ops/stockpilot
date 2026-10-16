@@ -34,7 +34,7 @@ S = scoring.SETTINGS
 SCAN = S["scan"]
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 FIELDS = ["symbol", "name", "sector", "price", "overall", "signal", "confidence", "expected_return",
-          "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event"]
+          "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event", "horizon"]
 
 
 def fname(sym):
@@ -142,7 +142,7 @@ def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_new
 def row_from(d, base):
     r = dict(base)
     r.update({k: d.get(k) for k in ("name", "sector", "price", "overall", "signal", "confidence", "expected_return",
-                                    "fundamental", "technical", "news", "stage")})
+                                    "fundamental", "technical", "news", "stage", "horizon")})
     return r
 
 
@@ -403,6 +403,8 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
 
     # ---- encrypted portfolio report + delivery
     key = os.environ.get("PORTFOLIO_KEY")
+    if key:  # lets the website check the user ID + password without storing them anywhere public
+        jsave(OUT / "lock.enc.json", secure.encrypt({"ok": True, "user": os.environ.get("LOGIN_USER", "")}, key))
     if portfolios and key:
         hist = []
         old = jload(OUT / "report.enc.json", None)
