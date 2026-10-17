@@ -521,7 +521,9 @@ function parseRows(rows) {
   return out;
 }
 async function readFile(file) {
-  if (/\.csv$/i.test(file.name)) {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  const binary = (head[0] === 0x50 && head[1] === 0x4b) || (head[0] === 0xd0 && head[1] === 0xcf);
+  if (!binary) {
     const text = await file.text();
     return text.split(/\r?\n/).map(l => l.match(/("([^"]|"")*"|[^,]*)(,|$)/g)?.map(c => c.replace(/,$/, '').replace(/^"|"$/g, '').replace(/""/g, '"')) || []);
   }
@@ -596,7 +598,9 @@ function viewPortfolios() {
   $('#pfexp').addEventListener('click', () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify({ portfolios, aliases }, null, 1)], { type: 'application/json' })); a.download = 'stockpilot-portfolios.json'; a.click(); });
   $('#pfimp').addEventListener('change', async e => {
     const file = e.target.files[0]; e.target.value = ''; if (!file) return;
-    if (/\.json$/i.test(file.name)) {
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+    const isZipOrXls = (head[0] === 0x50 && head[1] === 0x4b) || (head[0] === 0xd0 && head[1] === 0xcf);  // .xlsx / .xls
+    if (!isZipOrXls && (/\.json$/i.test(file.name) || (await file.slice(0, 200).text()).trim().startsWith('{'))) {
       try { const j = JSON.parse(await file.text()); if (!Array.isArray(j.portfolios)) throw new Error('Not a StockPilot backup'); portfolios = j.portfolios; aliases = j.aliases || aliases; savePf(); LS.set('aliases', aliases); viewPortfolios(); }
       catch (err) { alert('Import failed: ' + err.message); }
       return;
