@@ -1,0 +1,23 @@
+name: Probe data sources
+on: workflow_dispatch
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe
+        run: |
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+          p() { code=$(curl -s -L -m 25 -A "$UA" -H "Referer: $3" -o /tmp/out -w "%{http_code}" "$2"); echo "== $1 HTTP $code bytes $(wc -c </tmp/out)"; head -c ${4:-300} /tmp/out | tr '\n' ' '; echo; }
+          D=$(date -d "yesterday" +%d%m%Y); D2=$(date -d "2 days ago" +%d%m%Y)
+          p nse_deliv_y "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_${D}.csv" https://www.nseindia.com/
+          p nse_deliv_16oct "https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_16102026.csv" https://www.nseindia.com/
+          p bse_results "https://api.bseindia.com/BseIndiaAPI/api/Corpforthresults/w" https://www.bseindia.com/ 600
+          p bse_deliv "https://www.bseindia.com/markets/equity/EQReports/Delivery.aspx" https://www.bseindia.com/ 100
+          p screener "https://www.screener.in/company/GUJALKALI/" https://www.screener.in/ 200
+          curl -s -L -m 25 -A "$UA" "https://www.screener.in/company/GUJALKALI/" | grep -o 'id="shareholding"' | head -1
+          curl -s -L -m 25 -A "$UA" "https://www.screener.in/company/GUJALKALI/" | grep -o -i 'Promoters[^<]\{0,40\}' | head -3
+          p yahoo_q "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/INFY.NS?type=quarterlyNetIncome,quarterlyTotalRevenue&period1=1600000000&period2=1900000000" https://finance.yahoo.com/ 400
+          p nse_bulk "https://nsearchives.nseindia.com/content/equities/bulk.csv" https://www.nseindia.com/ 300
+          p nse_block "https://nsearchives.nseindia.com/content/equities/block.csv" https://www.nseindia.com/ 300
+          p bse_bulk "https://api.bseindia.com/BseIndiaAPI/api/BulkDealsData/w?flag=0" https://www.bseindia.com/ 300
+          p nse_pledge "https://nsearchives.nseindia.com/content/equities/pledge.csv" https://www.nseindia.com/ 200
