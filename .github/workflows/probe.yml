@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: Probe
         run: |
-                    UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+          UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
           mkdir -p /tmp/fx
           curl -s -L -m 25 -A "$UA" "https://www.screener.in/company/GUJALKALI/" -o /tmp/fx/screener_gujalkali.html
           curl -s -L -m 25 -A "$UA" "https://www.screener.in/company/MCX/consolidated/" -o /tmp/fx/screener_mcx.html
