@@ -164,7 +164,7 @@ const hzLine = h => {
   return `<div class="hz"><b>${esc(hzText(h))}</b>${bits.length ? ' · ' + esc(bits.join(' · ')) : ''}</div>`;
 };
 const stageLabel = s => ({ 1: 'Price scan only', 2: 'Fundamentals + technicals', 3: 'Full: + news & filings' }[s] || 'Not analysed');
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, 6000); }
+function toast(msg, ms = 6000) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(toast.t); toast.t = setTimeout(() => t.hidden = true, ms); }
 
 async function loadData(bust = false) {
   const q = bust ? '?t=' + Date.now() : '';
@@ -743,6 +743,8 @@ function matchSymbol(raw) {
   const s = String(raw).trim(), up = s.toUpperCase();
   if (aliases[up]) return aliases[up];
   if (BY.has(up)) return up;
+  const bare = up.replace(/[-.](EQ|BE|BZ|SM|ST|NS|N1|T|X)$/, '');  // broker series suffixes: GUJALKALI-EQ, XYZ-BE, ABC.NS
+  if (bare !== up && (aliases[bare] || BY.has(bare))) return aliases[bare] || bare;
   const k = norm(s);
   if (!k) return null;
   for (const r of ROWS) if (norm(r.name) === k || norm(r.symbol) === k) return r.symbol;
@@ -759,14 +761,17 @@ function parseRows(rows) {
   const cQty = col(QTY), cAvg = col(/avg|average|buy price|cost price|purchase price|buy rate/);
   const cInv = col(/invested|investment|buy value|cost value|purchase value|total cost/);
   if (cAvg < 0 && cInv < 0) throw new Error('Could not find an Average price (or Invested value) column.');
-  const out = [];
+  const out = [], skipped = [];
   for (const r of rows.slice(hi + 1)) {
     const num = v => parseFloat(String(v ?? '').replace(/[,₹\s]/g, ''));
     const qty = num(r[cQty]), avg = cAvg >= 0 ? num(r[cAvg]) : num(r[cInv]) / qty;
     const raw = (cSym >= 0 && r[cSym]) || (cName >= 0 && r[cName]);
-    if (!raw || !(qty > 0) || !(avg > 0)) continue;
-    out.push({ raw: String(raw).trim(), qty, avg });
+    if (!raw || /^(total|grand total|net)/i.test(String(raw).trim())) continue;  // blank and total rows
+    if (!(qty > 0)) { if (String(r[cQty] ?? '').trim() !== '') skipped.push({ raw: String(raw).trim(), qty: 0, avg: avg > 0 ? avg : 0, why: 'quantity is zero or unreadable' }); continue; }
+    if (!(avg > 0)) { skipped.push({ raw: String(raw).trim(), qty, avg: 0, why: 'no average price (bonus / gifted / transferred shares?)' }); continue; }
+    out.push({ raw: String(raw).trim(), qty, avg, ticker: cSym >= 0 && !!r[cSym] });
   }
+  out.skipped = skipped;
   return out;
 }
 async function readFile(file) {
@@ -812,7 +817,7 @@ function viewPortfolios() {
         <label class="btn ghost" style="cursor:pointer;flex:none">Upload broker file (.xlsx / .csv)<input type="file" id="upl" accept=".xlsx,.xls,.csv" hidden></label>
         <span class="hint" style="flex:1 1 220px">Upload replaces the holdings of the portfolio selected above (${esc(p.name)}).</span>
       </div>
-      <div id="unmatched"></div>
+      <div id="unmatched">${pendingHtml(p)}</div>
     </div>
     ${entryFactorsHtml()}
     <div class="tbox"><table id="pt"><thead><tr>
@@ -830,7 +835,7 @@ function viewPortfolios() {
     <td><button class="btn ghost small" data-del="${esc(r.symbol)}" aria-label="Remove ${esc(r.symbol)}">✕</button></td></tr>`).join('')
     : '<tr><td colspan="12" class="empty">No holdings yet. Add one above or upload your broker file.</td></tr>';
 
-  wireSync(v); wireEntryFactors(v, viewPortfolios);
+  wireSync(v); wireEntryFactors(v, viewPortfolios); wirePending(p);
   $('#csave').addEventListener('click', () => cloudSave());
   $('#cload').addEventListener('click', async () => { if (!cloudReady()) { toast('Set GitHub and a passphrase in Settings first.'); return; } if (await cloudLoad(true)) { toast('Loaded portfolios from cloud.'); viewPortfolios(); } });
   renderReports();
@@ -874,30 +879,49 @@ function viewPortfolios() {
 async function brokerImport(file, p) {
   try {
     const parsed = parseRows(await readFile(file)), matched = [], unmatched = [];
-    if (!parsed.length) throw new Error('No holdings rows found (each row needs a stock, a quantity and an average price).');
-    parsed.forEach(r => { const s = matchSymbol(r.raw); (s ? matched : unmatched).push({ ...r, symbol: s }); });
+    if (!parsed.length && !parsed.skipped.length) throw new Error('No holdings rows found (each row needs a stock, a quantity and an average price).');
+    parsed.forEach(r => {
+      let s = matchSymbol(r.raw);
+      // a clean ticker from the broker's Symbol column is kept even if today's scan doesn't list it (SME, BSE-only, ETF...)
+      if (!s && r.ticker && /^[A-Z0-9&-]{2,20}$/.test(r.raw.toUpperCase().replace(/-(EQ|BE|BZ|SM|ST)$/, ''))) s = r.raw.toUpperCase().replace(/-(EQ|BE|BZ|SM|ST)$/, '');
+      (s ? matched : unmatched).push({ ...r, symbol: s });
+    });
     const merge = {};
-    matched.forEach(r => { const m = merge[r.symbol]; if (m) { m.avg = (m.avg * m.qty + r.avg * r.qty) / (m.qty + r.qty); m.qty += r.qty; } else merge[r.symbol] = { symbol: r.symbol, raw: r.raw, qty: r.qty, avg: r.avg }; });
-    p.holdings = Object.values(merge); savePf(); viewPortfolios();
-    if (unmatched.length) showUnmatched(p, unmatched);
-    toast(`Loaded ${matched.length} holdings into "${p.name}"${unmatched.length ? `; ${unmatched.length} need a symbol` : ''}. Press Save to cloud when done.`);
+    matched.forEach(r => { const m = merge[r.symbol]; if (m) { m.avg = (m.avg * m.qty + r.avg * r.qty) / (m.qty + r.qty); m.qty += r.qty; m.merged = (m.merged || 1) + 1; } else merge[r.symbol] = { symbol: r.symbol, raw: r.raw, qty: r.qty, avg: r.avg }; });
+    const merged = Object.values(merge).filter(m => m.merged).map(m => `${m.symbol} (${m.merged} rows)`); Object.values(merge).forEach(m => delete m.merged);
+    p.holdings = Object.values(merge);
+    // anything not loaded stays listed on the portfolio page until you fix or dismiss it
+    p.pending = [...unmatched.map(r => ({ raw: r.raw, qty: r.qty, avg: r.avg, why: 'stock not recognised: type its NSE symbol' })), ...parsed.skipped];
+    savePf(); viewPortfolios();
+    const total = parsed.length + parsed.skipped.length;
+    toast(`Read ${total} rows from the file: ${p.holdings.length} stocks loaded${merged.length ? ` (${merged.join(', ')} combined)` : ''}${p.pending.length ? `; ${p.pending.length} not loaded, listed on the page` : ''}. Press Save to cloud when done.`, 9000);
     return true;
   } catch (err) { alert('Upload failed: ' + err.message); return false; }
 }
-function showUnmatched(p, list) {
-  const box = $('#unmatched');
-  box.innerHTML = `<div class="banner"><b>${list.length} rows need a symbol.</b> Type the NSE symbol for each (remembered for next upload). Leave blank to skip.
-    <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px">${list.map((r, i) => `<div class="row" style="align-items:center"><span style="flex:1 1 200px">${esc(r.raw)} · ${n(r.qty, f0)} @ ₹${n(r.avg)}</span><input data-i="${i}" list="symlist" placeholder="NSE symbol" style="flex:0 1 160px" aria-label="Symbol for ${esc(r.raw)}"></div>`).join('')}</div>
-    <button class="btn" id="mapok" style="margin-top:10px">Save mappings</button></div>`;
+function pendingHtml(p) {
+  const list = p.pending || [];
+  if (!list.length) return '';
+  return `<div class="banner"><b>${list.length} row${list.length > 1 ? 's' : ''} from your file not loaded yet.</b> Fill in what is missing (symbols are remembered for the next upload), then press Add. Rows left blank stay here until you dismiss them.
+    <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px">${list.map((r, i) => `<div class="row" style="align-items:center"><span style="flex:1 1 220px">${esc(r.raw)} · ${r.qty ? n(r.qty, f0) : '?'} @ ₹${r.avg ? n(r.avg) : '?'}<div class="hint">${esc(r.why)}</div></span>
+      <input data-sym="${i}" list="symlist" placeholder="NSE symbol" value="${esc(matchSymbol(r.raw) || '')}" style="flex:0 1 140px" aria-label="Symbol for ${esc(r.raw)}">
+      <input data-qty="${i}" type="number" min="0" step="any" placeholder="Qty" value="${r.qty || ''}" style="flex:0 1 90px" aria-label="Quantity for ${esc(r.raw)}">
+      <input data-avg="${i}" type="number" min="0" step="any" placeholder="Avg ₹" value="${r.avg || ''}" style="flex:0 1 100px" aria-label="Average price for ${esc(r.raw)}"></div>`).join('')}</div>
+    <div class="tools" style="margin-top:10px"><button class="btn" id="mapok">Add these</button><button class="btn ghost" id="mapdrop">Dismiss the rest</button></div></div>`;
+}
+function wirePending(p) {
+  const box = $('#unmatched'); if (!box || !$('#mapok')) return;
   $('#mapok').addEventListener('click', () => {
-    box.querySelectorAll('input[data-i]').forEach(inp => {
-      const sym = inp.value.trim().toUpperCase(), r = list[+inp.dataset.i]; if (!sym) return;
-      aliases[r.raw.toUpperCase()] = sym;
+    const keep = [];
+    (p.pending || []).forEach((r, i) => {
+      const sym = (box.querySelector(`[data-sym="${i}"]`)?.value || '').trim().toUpperCase(), qty = +box.querySelector(`[data-qty="${i}"]`)?.value, avg = +box.querySelector(`[data-avg="${i}"]`)?.value;
+      if (!sym || !(qty > 0) || !(avg > 0)) { keep.push(r); return; }
+      if (sym !== r.raw.toUpperCase()) aliases[r.raw.toUpperCase()] = sym;
       const ex = p.holdings.find(h => h.symbol === sym);
-      if (ex) { ex.avg = (ex.avg * ex.qty + r.avg * r.qty) / (ex.qty + r.qty); ex.qty += r.qty; } else p.holdings.push({ symbol: sym, raw: r.raw, qty: r.qty, avg: r.avg });
+      if (ex) { ex.avg = (ex.avg * ex.qty + avg * qty) / (ex.qty + qty); ex.qty += qty; } else p.holdings.push({ symbol: sym, raw: r.raw, qty, avg });
     });
-    LS.set('aliases', aliases); savePf(); viewPortfolios();
+    p.pending = keep; LS.set('aliases', aliases); savePf(); viewPortfolios();
   });
+  $('#mapdrop').addEventListener('click', () => { p.pending = []; savePf(); viewPortfolios(); });
 }
 
 async function renderReports() {
