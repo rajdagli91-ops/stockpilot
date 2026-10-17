@@ -244,7 +244,7 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
         "horizon": horizon, "short_term": st, "entry": entry,
         "strengths": [v[0] for _, v in ranked[::-1][:2]],
         "weaknesses": [v[0] for _, v in ranked[:2]],
-        "points": action_points(params, signal, er, t, flags, (macro or {}).get("why") or [], horizon),
+        "points": action_points(params, signal, er, t, flags, (macro or {}).get("why") or [], horizon, f, entry),
         "params": [{"key": k, "label": v[0], "group": v[1], "score": None if v[2] is None else round(v[2]),
                     "value": None if v[3] is None else round(float(v[3]), 2), "unit": v[4], "weight": w[k]}
                    for k, v in params.items()],
@@ -257,7 +257,7 @@ def _f(x, d=0):
 
 
 GOOD = {
-    "expected_return": lambda v: f"Expected return about {_f(v)}%/yr meets your 15–18% long-term target",
+    "expected_return": lambda v: f"Expected return about {_f(v)}%/yr meets your {SETTINGS['horizons']['long_term_min_cagr']}%+ long-term target",
     "profit_growth": lambda v: f"Profits have compounded {_f(v)}% a year over 3 years",
     "revenue_growth": lambda v: f"Revenue growing {_f(v)}% a year",
     "roe": lambda v: f"High return on equity ({_f(v)}%): the business earns well on its capital",
@@ -272,7 +272,7 @@ GOOD = {
     "global": lambda v: "Global markets are a tailwind for this sector",
 }
 BAD = {
-    "expected_return": lambda v: f"Expected return only about {_f(v)}%/yr, below your 15% long-term target",
+    "expected_return": lambda v: f"Expected return only about {_f(v)}%/yr, below your {SETTINGS['horizons']['long_term_min_cagr']}% long-term target",
     "profit_growth": lambda v: f"Profit growth weak ({_f(v)}% a year over 3 years)",
     "revenue_growth": lambda v: f"Revenue growth weak ({_f(v)}% a year)",
     "roe": lambda v: f"Low return on equity ({_f(v)}%)",
@@ -289,7 +289,33 @@ BAD = {
 }
 
 
-def action_points(params, signal, er, t, flags, macro_why, horizon=None):
+def risk_points(params, f, t, entry, have_cons):
+    """Every stock has risks. When nothing scores badly, still say what could go wrong (needed for picks)."""
+    out = []
+    for k, v in sorted(params.items(), key=lambda kv: kv[1][2] if kv[1][2] is not None else 999):
+        if v[2] is not None and 35 < v[2] <= 55 and k in BAD and v[3] is not None and k not in ("news", "global", "red_flags"):
+            out.append("Watch: " + BAD[k](v[3])[0].lower() + BAD[k](v[3])[1:])
+    vol, pe, ext, hi = t.get("volatility"), f.get("pe"), t.get("vs_200dma"), t.get("from_52w_high")
+    if vol and vol >= 32:
+        out.append(f"Volatile: about {vol:.0f}% annual swings, so a 25–30% fall at some point is quite possible")
+    if pe and pe >= 40:
+        out.append(f"High P/E of {pe:.0f}: priced for strong growth; any slowdown can hit the price hard")
+    if ext is not None and ext >= 20:
+        out.append(f"Already {ext:.0f}% above its 200-day average; a pull-back is common after such runs")
+    if hi is not None and hi > -3:
+        out.append("Trading near its 52-week high; buying in parts is safer than all at once")
+    if f.get("market_cap") and f["market_cap"] < 5e10:
+        out.append(f"Small company (about ₹{f['market_cap'] / 1e7:,.0f} Cr market cap): thinner trading and bigger falls in bad markets")
+    if f.get("loss_making"):
+        out.append("Loss-making in the latest year")
+    if f.get("debt_equity") and f["debt_equity"] > 1 and not any("debt" in x.lower() for x in out):
+        out.append(f"Debt is {f['debt_equity']:.1f}× equity")
+    if len(out) + have_cons < 2:
+        out.append("The expected return is a projection from past growth; if growth slows, returns will be lower")
+    return out
+
+
+def action_points(params, signal, er, t, flags, macro_why, horizon=None, f=None, entry=None):
     have = [(k, v) for k, v in params.items() if v[2] is not None and v[3] is not None]
     good = sorted([(k, v) for k, v in have if v[2] >= 70 and k in GOOD], key=lambda kv: -kv[1][2] * SETTINGS["weights"].get(kv[0], 1))
     bad = sorted([(k, v) for k, v in have if v[2] <= 35 and k in BAD], key=lambda kv: kv[1][2] / max(SETTINGS["weights"].get(kv[0], 1), 1))
@@ -297,6 +323,11 @@ def action_points(params, signal, er, t, flags, macro_why, horizon=None):
     con = [BAD[k](v[3]) for k, v in bad[:4]]
     if macro_why:
         (pro if (params["global"][2] or 50) >= 50 else con).append("Global: " + "; ".join(macro_why[:2]))
+    if f is not None:
+        seen = " ".join(con).lower()
+        extra = [x for x in risk_points(params, f, t, entry, len(con))
+                 if not (("debt" in x.lower() and "debt" in seen) or ("cash" in x.lower() and "cash" in seen))]
+        con += extra[:max(0, 5 - len(con))]
     h = horizon or {}
     label = {"BUY": "Buy", "SELL": "Exit", "HOLD": "Hold"}.get(signal, "No call")
     verdict = f"{label} · {h.get('term', '')} ({h.get('period', '')})" if h else label
