@@ -1,11 +1,14 @@
 name: Probe data sources
 on: workflow_dispatch
+permissions:
+  contents: write
 jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
       - name: Probe
         run: |
+          exec > >(tee /tmp/probe.txt) 2>&1
           UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
           p() { code=$(curl -s -L -m 25 -A "$UA" -H "Referer: $3" -o /tmp/out -w "%{http_code}" "$2"); echo "== $1 HTTP $code bytes $(wc -c </tmp/out)"; head -c ${4:-300} /tmp/out | tr '\n' ' '; echo; }
           D=$(date -d "yesterday" +%d%m%Y); D2=$(date -d "2 days ago" +%d%m%Y)
@@ -21,3 +24,9 @@ jobs:
           p nse_block "https://nsearchives.nseindia.com/content/equities/block.csv" https://www.nseindia.com/ 300
           p bse_bulk "https://api.bseindia.com/BseIndiaAPI/api/BulkDealsData/w?flag=0" https://www.bseindia.com/ 300
           p nse_pledge "https://nsearchives.nseindia.com/content/equities/pledge.csv" https://www.nseindia.com/ 200
+      - name: Save results
+        if: always()
+        run: |
+          sleep 2; cd /tmp && mkdir pr && cd pr && git init -q && cp /tmp/probe.txt . && git add probe.txt
+          git -c user.name=bot -c user.email=bot@users.noreply.github.com commit -qm probe
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" HEAD:refs/heads/probe
