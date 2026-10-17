@@ -501,16 +501,19 @@ function matchSymbol(raw) {
   return hits.length === 1 ? hits[0].symbol : null;
 }
 function parseRows(rows) {
-  const hi = rows.findIndex(r => r.some(c => /qty|quantity/i.test(String(c))));
-  if (hi < 0) throw new Error('Could not find a Quantity column.');
+  const QTY = /qty|quantity|no\.? ?of shares|shares|units/i;
+  const hi = rows.findIndex(r => r.some(c => QTY.test(String(c ?? ''))));
+  if (hi < 0) throw new Error('Could not find a Quantity column. Is this the holdings export (not P&L or tradebook)?');
   const hdr = rows[hi].map(c => String(c || '').toLowerCase());
   const col = re => hdr.findIndex(h => re.test(h));
   const cSym = col(/symbol|tradingsymbol|instrument/), cName = col(/security|stock|scrip|name|company/);
-  const cQty = col(/qty|quantity/), cAvg = col(/avg|average|buy price|cost price/);
-  if (cAvg < 0) throw new Error('Could not find an Average price column.');
+  const cQty = col(QTY), cAvg = col(/avg|average|buy price|cost price|purchase price|buy rate/);
+  const cInv = col(/invested|investment|buy value|cost value|purchase value|total cost/);
+  if (cAvg < 0 && cInv < 0) throw new Error('Could not find an Average price (or Invested value) column.');
   const out = [];
   for (const r of rows.slice(hi + 1)) {
-    const qty = parseFloat(String(r[cQty] ?? '').replace(/,/g, '')), avg = parseFloat(String(r[cAvg] ?? '').replace(/,/g, ''));
+    const num = v => parseFloat(String(v ?? '').replace(/[,₹\s]/g, ''));
+    const qty = num(r[cQty]), avg = cAvg >= 0 ? num(r[cAvg]) : num(r[cInv]) / qty;
     const raw = (cSym >= 0 && r[cSym]) || (cName >= 0 && r[cName]);
     if (!raw || !(qty > 0) || !(avg > 0)) continue;
     out.push({ raw: String(raw).trim(), qty, avg });
@@ -540,7 +543,7 @@ function viewPortfolios() {
       <div class="tabs" id="pftabs">${portfolios.map(x => `<button data-id="${esc(x.id)}" class="${x.id === activePf ? 'on' : ''}">${esc(x.name)}</button>`).join('')}</div>
       <button class="btn ghost" id="pfnew">+ New portfolio</button><span style="flex:1"></span>
       <button class="btn ghost" id="pfren">Rename</button><button class="btn danger" id="pfdel">Delete</button>
-      <button class="btn ghost" id="pfexp">Export</button><label class="btn ghost" style="cursor:pointer">Import<input type="file" id="pfimp" accept=".json" hidden></label>
+      <button class="btn ghost" id="pfexp">Export</button><label class="btn ghost" style="cursor:pointer" title="Broker holdings file (.xlsx / .xls / .csv) becomes a new portfolio; a StockPilot backup (.json) restores everything">Import file<input type="file" id="pfimp" accept=".xlsx,.xls,.csv,.json" hidden></label>
     </div>
     <div class="card cloud"><div><b>Saved in this browser.</b> <span class="hint" id="cloudstate">${cloudReady() ? (LS.get('cloudSaved', 0) ? 'Cloud copy saved ' + new Date(LS.get('cloudSaved')).toLocaleString('en-IN') : 'Not saved to cloud yet') : 'Add GitHub + a passphrase in Settings to save an encrypted copy, so scheduled reports (pre-market, 1 PM, 3 PM) include your portfolios and other devices can load them.'}</span></div>
       <div class="tools"><button class="btn ghost small" id="csave">Save to cloud</button><button class="btn ghost small" id="cload">Load from cloud</button></div></div>
@@ -592,8 +595,16 @@ function viewPortfolios() {
   $('#pfdel').addEventListener('click', () => { if (!confirm(`Delete "${p.name}"? This cannot be undone.`)) return; portfolios = portfolios.filter(x => x !== p); savePf(); viewPortfolios(); });
   $('#pfexp').addEventListener('click', () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([JSON.stringify({ portfolios, aliases }, null, 1)], { type: 'application/json' })); a.download = 'stockpilot-portfolios.json'; a.click(); });
   $('#pfimp').addEventListener('change', async e => {
-    try { const j = JSON.parse(await e.target.files[0].text()); if (!Array.isArray(j.portfolios)) throw new Error('Not a StockPilot backup'); portfolios = j.portfolios; aliases = j.aliases || aliases; savePf(); LS.set('aliases', aliases); viewPortfolios(); }
-    catch (err) { alert('Import failed: ' + err.message); }
+    const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+    if (/\.json$/i.test(file.name)) {
+      try { const j = JSON.parse(await file.text()); if (!Array.isArray(j.portfolios)) throw new Error('Not a StockPilot backup'); portfolios = j.portfolios; aliases = j.aliases || aliases; savePf(); LS.set('aliases', aliases); viewPortfolios(); }
+      catch (err) { alert('Import failed: ' + err.message); }
+      return;
+    }
+    // broker spreadsheet -> a new portfolio named after the file (rename it afterwards if you like)
+    const id = 'p' + Date.now(), np = { id, name: file.name.replace(/\.[^.]+$/, '').slice(0, 40) || 'Imported', holdings: [] };
+    portfolios.push(np); activePf = id; LS.set('activePf', id);
+    if (!(await brokerImport(file, np))) { portfolios = portfolios.filter(x => x !== np); activePf = p.id; LS.set('activePf', p.id); savePf(); viewPortfolios(); }
   });
   $('#hadd').addEventListener('click', () => {
     const sym = $('#hsym').value.trim().toUpperCase(), qty = +$('#hqty').value, avg = +$('#havg').value;
@@ -602,18 +613,20 @@ function viewPortfolios() {
     if (ex) Object.assign(ex, { qty, avg }); else p.holdings.push({ symbol: sym, qty, avg });
     savePf(); viewPortfolios();
   });
-  $('#upl').addEventListener('change', async e => {
-    const file = e.target.files[0]; if (!file) return;
-    try {
-      const parsed = parseRows(await readFile(file)), matched = [], unmatched = [];
-      parsed.forEach(r => { const s = matchSymbol(r.raw); (s ? matched : unmatched).push({ ...r, symbol: s }); });
-      const merge = {};
-      matched.forEach(r => { const m = merge[r.symbol]; if (m) { m.avg = (m.avg * m.qty + r.avg * r.qty) / (m.qty + r.qty); m.qty += r.qty; } else merge[r.symbol] = { symbol: r.symbol, raw: r.raw, qty: r.qty, avg: r.avg }; });
-      p.holdings = Object.values(merge); savePf(); viewPortfolios();
-      if (unmatched.length) showUnmatched(p, unmatched);
-      toast(`Loaded ${matched.length} holdings${unmatched.length ? `; ${unmatched.length} need a symbol` : ''}.`);
-    } catch (err) { alert('Upload failed: ' + err.message); }
-  });
+  $('#upl').addEventListener('change', async e => { const file = e.target.files[0]; e.target.value = ''; if (file) await brokerImport(file, p); });
+}
+async function brokerImport(file, p) {
+  try {
+    const parsed = parseRows(await readFile(file)), matched = [], unmatched = [];
+    if (!parsed.length) throw new Error('No holdings rows found (each row needs a stock, a quantity and an average price).');
+    parsed.forEach(r => { const s = matchSymbol(r.raw); (s ? matched : unmatched).push({ ...r, symbol: s }); });
+    const merge = {};
+    matched.forEach(r => { const m = merge[r.symbol]; if (m) { m.avg = (m.avg * m.qty + r.avg * r.qty) / (m.qty + r.qty); m.qty += r.qty; } else merge[r.symbol] = { symbol: r.symbol, raw: r.raw, qty: r.qty, avg: r.avg }; });
+    p.holdings = Object.values(merge); savePf(); viewPortfolios();
+    if (unmatched.length) showUnmatched(p, unmatched);
+    toast(`Loaded ${matched.length} holdings into "${p.name}"${unmatched.length ? `; ${unmatched.length} need a symbol` : ''}. Press Save to cloud when done.`);
+    return true;
+  } catch (err) { alert('Upload failed: ' + err.message); return false; }
 }
 function showUnmatched(p, list) {
   const box = $('#unmatched');
