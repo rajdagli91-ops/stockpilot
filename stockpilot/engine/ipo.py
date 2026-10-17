@@ -426,7 +426,7 @@ def analyse(ipo, details, market, newsp=None):
     headlines = []
     if newsp:
         try:
-            headlines = newsp.headlines(ipo["name"] + " IPO", days=20, limit=5)
+            headlines = newsp.headlines(ipo["name"] + " IPO", days=20, limit=5, strict=False)
         except Exception:
             pass
     return {**{k: v for k, v in ipo.items() if k not in ("revenue", "pat")}, "sector": sector,

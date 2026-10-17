@@ -119,7 +119,7 @@ def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_new
     headlines, filings = [], list(extra_filings)
     if with_news:
         try:
-            headlines = newsp.headlines(name)
+            headlines = newsp.headlines(name, symbol=sym.replace(".BO", ""))
         except Exception as e:
             errors.append(f"news: {e}")
         if bse_code:
@@ -225,7 +225,7 @@ def add_news(sym, d, newsp, market, bse_code="", extra=()):
     f, t = dict(d.get("fundamentals") or {}), dict(d.get("technicals") or {})
     headlines, filings, errors = [], list(extra), []
     try:
-        headlines = newsp.headlines(d.get("name") or sym)
+        headlines = newsp.headlines(d.get("name") or sym, symbol=sym.replace(".BO", ""))
     except Exception as e:
         errors.append(f"news: {e}")
     if bse_code:
