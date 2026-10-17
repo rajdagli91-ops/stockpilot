@@ -34,7 +34,8 @@ S = scoring.SETTINGS
 SCAN = S["scan"]
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 FIELDS = ["symbol", "name", "sector", "price", "overall", "signal", "confidence", "expected_return",
-          "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event", "horizon"]
+          "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event", "horizon",
+          "mcap_cr", "cap", "entry"]
 
 
 def fname(sym):
@@ -143,7 +144,19 @@ def row_from(d, base):
     r = dict(base)
     r.update({k: d.get(k) for k in ("name", "sector", "price", "overall", "signal", "confidence", "expected_return",
                                     "fundamental", "technical", "news", "stage", "horizon")})
+    mc = (d.get("fundamentals") or {}).get("market_cap")
+    if mc:
+        r["mcap_cr"] = round(mc / 1e7)
+    e = d.get("entry") or {}
+    r["entry"] = e.get("score")
     return r
+
+
+def assign_caps(rows):
+    """SEBI-style buckets by market-cap rank: 1-100 Large, 101-250 Mid, 251-500 Small, rest Micro."""
+    ranked = sorted((r for r in rows.values() if r.get("mcap_cr")), key=lambda r: -r["mcap_cr"])
+    for i, r in enumerate(ranked, 1):
+        r["cap"] = "Large" if i <= 100 else "Mid" if i <= 250 else "Small" if i <= 500 else "Micro"
 
 
 def choose_picks(rows, details):
@@ -388,6 +401,7 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     if mode in ("full", "quick"):
         jsave(OUT / "events.json", {"updated": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"), "events": events[:200]}, compact=False)
 
+    assign_caps(rows)
     picks, wait = choose_picks(rows, details)
     ipos = []
     if mode in ("full", "quick"):
