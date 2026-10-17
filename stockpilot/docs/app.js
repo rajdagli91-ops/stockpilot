@@ -31,7 +31,8 @@ const scoreColor = v => v == null ? 'var(--nodata)' : v >= 66 ? 'var(--buy)' : v
 const bar = v => `<div class="bar"><i><b style="width:${v ?? 0}%;background:${scoreColor(v)}"></b></i><span>${v == null ? '—' : Math.round(v)}</span></div>`;
 const norm = s => String(s || '').toUpperCase().replace(/LIMITED|LTD\.?|\bEQ\b|EQUITY|\(I\)|INDIA|&|[^A-Z0-9]/g, '');
 const fileOf = sym => 'data/stocks/' + encodeURIComponent(sym.replace(/&/g, '_')) + '.json';
-const target = () => META.target_cagr || 18;
+let pickPrefs = LS.get('pickPrefs', { tgt: null, cap: '' });
+const target = () => pickPrefs.tgt || META.target_cagr || 18;
 const heldSet = () => new Set(portfolios.flatMap(p => p.holdings.map(h => h.symbol)));
 // Hold / Exit only make sense for stocks you own; anything else is Buy or Not a buy.
 const sigLabel = (sym, sig) => !sig || sig === 'SCAN' || sig === 'NO DATA' ? (sig || 'NO DATA') : sig === 'BUY' ? 'BUY' : heldSet().has(sym) ? (sig === 'SELL' ? 'EXIT' : 'HOLD') : 'NOT A BUY';
@@ -337,39 +338,88 @@ function wireClaude(root, getPrompt) {
 }
 
 // ================================================================ view: top picks (home)
+const CAPS = [['', 'All'], ['Large', 'Large cap'], ['Mid', 'Mid cap'], ['Small', 'Small cap'], ['Micro', 'Micro cap']];
+const capText = r => r?.cap ? `${r.cap} cap${r.mcap_cr ? ' · ₹' + f0.format(r.mcap_cr) + ' Cr' : ''}` : '';
+// Picks are chosen here in the browser from every analysed stock, so the target and the cap filter apply instantly.
+function computePicks() {
+  const tgt = target(), cap = pickPrefs.cap, minT = META.scan?.min_traded_cr ?? 2, minE = META.scan?.min_entry_score ?? 55, perSec = META.scan?.max_picks_per_sector ?? 2;
+  const live = ROWS.some(r => r.entry != null);
+  if (!live) return { live, picks: PICKS, wait: WAIT, pool: PICKS.length };
+  const pool = ROWS.filter(r => (r.stage || 0) >= 2 && r.overall != null && r.expected_return != null && r.expected_return >= tgt
+    && (r.signal === 'BUY' || (r.signal === 'HOLD' && r.overall >= 60)) && ['High', 'Medium'].includes(r.confidence)
+    && (r.traded_cr || 0) >= minT && (!cap || r.cap === cap));
+  const rank = r => 0.55 * r.overall + 0.45 * r.entry;
+  const ready = pool.filter(r => r.entry != null && r.entry >= minE).sort((x, y) => rank(y) - rank(x));
+  const picks = [], secs = {};
+  for (const r of ready) { const k = r.sector || 'Other'; if ((secs[k] || 0) >= perSec) continue; picks.push(r); secs[k] = (secs[k] || 0) + 1; if (picks.length === 5) break; }
+  const wait = pool.filter(r => r.entry != null && r.entry < minE).sort((x, y) => y.overall - x.overall).slice(0, 8);
+  return { live, picks, wait, pool: pool.length };
+}
+function pickCard(x, d, i) {
+  const t = d?.technicals || {}, e = d?.entry || x.entry || null, ent = typeof e === 'object' ? e : null;
+  const pts = d?.points || x.points;
+  return `<a class="ph" href="#stock/${encodeURIComponent(x.symbol)}"><div><span class="rank">#${i + 1}</span> <b class="sym">${esc(x.symbol)}</b><div class="muted nm">${esc(x.name || '')}</div></div><div class="big" style="color:${scoreColor(x.overall)}">${Math.round(x.overall)}</div></a>
+    <div class="pm">${pill(x.signal)} <span class="hint">${esc(x.confidence || '')} confidence · ${esc(x.sector || '')}${x.cap ? ' · ' + esc(capText(x)) : ''}</span></div>
+    ${hzLine(d?.horizon || x.horizon)}
+    ${ent ? entryHtml(ent) : (typeof e === 'number' ? `<div class="hint">Entry timing ${e}/100</div>` : '')}
+    <dl><dt>Expected return</dt><dd class="${x.expected_return >= target() ? 'pos' : ''}">${pc(x.expected_return)}/yr</dd>
+      <dt>P/E · PEG</dt><dd>${n(ent?.pe, f0)} · ${ent?.peg != null ? ent.peg.toFixed(1) : '—'}</dd>
+      <dt>12 months</dt><dd>${pc(x.ret_12m)}</dd><dt>vs 50-day avg</dt><dd>${pc(ent?.vs_50dma)}</dd><dt>vs 200-day avg</dt><dd>${pc(t.vs_200dma ?? x.vs_200dma)}</dd><dt>RSI</dt><dd>${n(t.rsi ?? x.rsi, f0)}</dd></dl>
+    ${pts ? pointsHtml({ verdict: pts.verdict, for: (pts.for || []).slice(0, 4), against: pts.against || [] }) : '<p class="hint">Loading reasons…</p>'}
+    ${(x.stage || d?.stage) < 3 ? '<p class="hint">News and filings not checked yet for this stock (only the top candidates are, each morning).</p>' : ''}
+    ${claudeBox(x.symbol)}`;
+}
+async function saveTargetDefault(t) {
+  if (!ghReady()) { toast('Set up GitHub in Settings first.'); location.hash = 'settings'; return; }
+  for (const path of ['/contents/stockpilot/config/settings.json', '/contents/config/settings.json']) {
+    let f; try { f = await gh(path); } catch { continue; }
+    try {
+      const j = JSON.parse(b64utf8(f.content));
+      j.target_cagr = t; j.horizons = { ...(j.horizons || {}), long_term_min_cagr: t, long_term_good_cagr: t + 3 };
+      await gh(path, { method: 'PUT', body: JSON.stringify({ message: `Set target return to ${t}%/yr`, content: utf8b64(JSON.stringify(j, null, 2) + '\n'), sha: f.sha }) });
+      toast(`Saved: scheduled scans will rate stocks against ${t}%/yr from the next run.`); return;
+    } catch (e) { toast('Could not save: ' + e.message); return; }
+  }
+  toast('Could not find config/settings.json in your repository.');
+}
 function viewPicks() {
   const v = $('#view');
   const pf = portfolios.find(x => x.id === activePf) || portfolios[0];
+  const { live, picks, wait, pool } = computePicks();
   v.innerHTML = `
-    <div><h1>Top ${PICKS.length || 5} picks today</h1>
+    <div><h1>Top ${picks.length || 5} picks${pickPrefs.cap ? ' · ' + esc(pickPrefs.cap) + ' cap' : ''}</h1>
       <p class="sub">${META.scanned ? `From ${f0.format(META.scanned)} NSE stocks scanned, ${f0.format(META.analysed || 0)} liquid ones analysed on fundamentals and technicals, ${META.deep || 0} checked for news and filings.` : 'No scan yet.'} ${META.last_full_scan ? 'Last full scan ' + esc(META.last_full_scan) + '.' : ''}</p></div>
+    <div class="card pickctl">
+      <div class="row" style="align-items:center;gap:14px">
+        <label class="tgt">Target return <input id="ptgt" type="number" min="5" max="60" step="1" value="${target()}" style="width:72px" aria-label="Target return per year"> %/yr</label>
+        <div class="tabs" id="pcap" role="group" aria-label="Company size">${CAPS.map(([k, l]) => `<button data-cap="${k}" class="${(pickPrefs.cap || '') === k ? 'on' : ''}" ${live ? '' : 'disabled'}>${l}</button>`).join('')}</div>
+        <button class="btn ghost small" id="ptgtsave" title="Also use this target for BUY/SELL signals in the scheduled scans">Use in scheduled scans</button>
+      </div>
+      <p class="hint" style="margin:8px 0 0">${live ? `${pool} stocks expect at least ${target()}%/yr with a buy-quality score${pickPrefs.cap ? ' in ' + esc(pickPrefs.cap) + ' cap' : ''}; the best ${picks.length} at a sensible price are below. Large = top 100 companies by market value, Mid = 101–250, Small = 251–500, Micro = the rest.` : 'The size filter and live target turn on after the next full scan (Monday 7:15 AM, or Fetch → Fetch full market).'}</p>
+    </div>
     ${MARKET.mood != null ? `<a class="moodbar" href="#market"><span>Global markets</span><b style="color:${scoreColor(MARKET.mood)}">${MARKET.mood}/100 · ${esc(MARKET.bias)}</b><span class="muted">${esc((MARKET.markets || []).filter(x => ['sp500', 'nasdaq', 'nikkei', 'brent', 'usdinr'].includes(x.key)).map(x => x.label + ' ' + pc(x.chg_1d)).join(' · '))}</span></a>` : ''}
-    ${PICKS.length ? `<div class="picks">${PICKS.map((x, i) => `
-      <div class="pick">
-        <a class="ph" href="#stock/${encodeURIComponent(x.symbol)}"><div><span class="rank">#${i + 1}</span> <b class="sym">${esc(x.symbol)}</b><div class="muted nm">${esc(x.name || '')}</div></div><div class="big" style="color:${scoreColor(x.overall)}">${Math.round(x.overall)}</div></a>
-        <div class="pm">${pill(x.signal)} <span class="hint">${esc(x.confidence)} confidence · ${esc(x.sector || '')}</span></div>
-        ${hzLine(x.horizon)}
-        ${entryHtml(x.entry)}
-        <dl><dt>Expected return</dt><dd class="${x.expected_return >= target() ? 'pos' : ''}">${pc(x.expected_return)}/yr</dd>
-            <dt>P/E · PEG</dt><dd>${n(x.entry?.pe, f0)} · ${x.entry?.peg != null ? x.entry.peg.toFixed(1) : '—'}</dd>
-            <dt>12 months</dt><dd>${pc(x.ret_12m)}</dd><dt>vs 50-day avg</dt><dd>${pc(x.entry?.vs_50dma)}</dd><dt>vs 200-day avg</dt><dd>${pc(x.vs_200dma)}</dd><dt>RSI</dt><dd>${n(x.rsi, f0)}</dd></dl>
-        ${pointsHtml(x.points, true)}
-        ${claudeBox(x.symbol)}
-      </div>`).join('')}</div>
-      <p class="hint">Picks need a BUY signal (business good enough for your return target), an entry-timing score of at least ${META.scan?.min_entry_score ?? 55} (price not stretched vs its averages, RSI not overheated, P/E reasonable for its growth, trend up), Medium or High confidence, at least ₹${META.scan?.min_traded_cr ?? 2} Cr traded daily, and at most ${META.scan?.max_picks_per_sector ?? 2} per sector. ${PICKS.length < 5 ? `Only ${PICKS.length} stocks cleared the bar; the system doesn't pad the list.` : ''}</p>`
-      : `<div class="card empty">${ROWS.length ? "No stock cleared the BUY bar in the latest analysis. That happens in expensive or falling markets; the system won't force picks." : 'Run the first full scan to see picks.'}</div>`}
-    ${WAIT.length ? `<div class="card"><div class="cardhead"><h2>Good businesses, wrong price today</h2><span class="hint">BUY-rated, but stretched right now. Buy near the zone, not at today's price.</span></div>
+    ${picks.length ? `<div class="picks">${picks.map((x, i) => `<div class="pick" id="pk${i}">${pickCard(x, null, i)}</div>`).join('')}</div>
+      <p class="hint">Picks need: expected return of at least ${target()}%/yr, a buy-quality score, an entry-timing score of at least ${META.scan?.min_entry_score ?? 55} (price not stretched vs its averages, RSI not overheated, P/E reasonable for its growth, trend up), Medium or High confidence, at least ₹${META.scan?.min_traded_cr ?? 2} Cr traded daily, and at most ${META.scan?.max_picks_per_sector ?? 2} per sector. ${picks.length < 5 ? `Only ${picks.length} stocks cleared the bar; the system doesn't pad the list.` : ''}</p>`
+      : `<div class="card empty">${ROWS.length ? `No stock cleared the bar${pickPrefs.cap ? ' in ' + esc(pickPrefs.cap) + ' cap' : ''} at ${target()}%/yr. Try a lower target or another size; the system won't force picks.` : 'Run the first full scan to see picks.'}</div>`}
+    ${wait.length ? `<div class="card"><div class="cardhead"><h2>Good businesses, wrong price today</h2><span class="hint">Meet your target, but stretched right now. Buy near the zone, not at today's price.</span></div>
       <div class="tbox"><table><thead><tr><th>Stock</th><th class="num">Score</th><th class="num">Entry</th><th class="num">Price</th><th class="num">Buy zone</th><th class="hide-sm">Why wait</th></tr></thead><tbody id="waitb">
-      ${WAIT.map(x => `<tr class="click" data-s="${esc(x.symbol)}"><td><b>${esc(x.symbol)}</b><div class="muted" style="font-size:12px">${esc((x.name || '').slice(0, 28))}</div></td><td class="num">${Math.round(x.overall)}</td><td class="num">${x.entry?.score ?? '—'}</td><td class="num">${n(x.price, f0)}</td><td class="num">${x.entry?.zone ? n(x.entry.zone[0], f0) + '–' + n(x.entry.zone[1], f0) : '—'}</td><td class="hide-sm" style="white-space:normal;min-width:200px">${esc((x.entry?.why || []).join('; '))}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
+      ${wait.map(x => { const e = typeof x.entry === 'object' ? x.entry : null; return `<tr class="click" data-s="${esc(x.symbol)}"><td><b>${esc(x.symbol)}</b><div class="muted" style="font-size:12px">${esc((x.name || '').slice(0, 28))}${x.cap ? ' · ' + esc(x.cap) : ''}</div></td><td class="num">${Math.round(x.overall)}</td><td class="num">${e ? e.score : x.entry ?? '—'}</td><td class="num">${n(x.price, f0)}</td><td class="num" data-zone>${e?.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '…'}</td><td class="hide-sm" data-why style="white-space:normal;min-width:200px">${esc((e?.why || []).join('; '))}</td></tr>`; }).join('')}</tbody></table></div></div>` : ''}
     ${IPOS.filter(x => x.call === 'APPLY').length ? `<div class="card"><div class="cardhead"><h2>IPOs worth applying for</h2><a href="#ipos">All IPOs →</a></div><div class="syms">${IPOS.filter(x => x.call === 'APPLY').map(x => `<a href="#ipos">${esc(x.name)} · ${x.score}</a>`).join('')}</div></div>` : ''}
     <div class="card"><div class="cardhead"><h2>Your portfolio today: ${esc(pf?.name || '')}</h2><a href="#portfolios">Open portfolio →</a></div>${pf ? reportHtml(pf, true) : ''}</div>`;
   wireSync(v);
   v.querySelectorAll('#waitb tr[data-s]').forEach(tr => tr.addEventListener('click', () => { location.hash = 'stock/' + encodeURIComponent(tr.dataset.s); }));
   wireClaude(v, async sym => stockPrompt(await loadDetail(sym) || BY.get(sym)));
+  const tg = $('#ptgt');
+  tg.addEventListener('change', () => { const t = Math.max(5, Math.min(60, Math.round(+tg.value || 0))); pickPrefs.tgt = t; LS.set('pickPrefs', pickPrefs); viewPicks(); });
+  $('#pcap').addEventListener('click', e => { const b = e.target.closest('button[data-cap]'); if (!b) return; pickPrefs.cap = b.dataset.cap; LS.set('pickPrefs', pickPrefs); viewPicks(); });
+  $('#ptgtsave').addEventListener('click', () => saveTargetDefault(target()));
+  if (!live) return;
+  picks.forEach(async (x, i) => { const d = await loadDetail(x.symbol).catch(() => null); const el = document.getElementById('pk' + i); if (el && d) { el.innerHTML = pickCard(x, d, i); wireClaude(el, async sym => stockPrompt(await loadDetail(sym) || BY.get(sym))); } });
+  v.querySelectorAll('#waitb tr[data-s]').forEach(async tr => { const d = await loadDetail(tr.dataset.s).catch(() => null); const e = d?.entry; if (!e) return; tr.querySelector('[data-zone]').textContent = e.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '—'; tr.querySelector('[data-why]').textContent = (e.why || []).join('; '); });
 }
 
 // ================================================================ view: screener
-let sc = { q: '', sig: '', sector: '', min: 0, deep: true, key: 'overall', dir: -1 };
+let sc = { q: '', sig: '', sector: '', cap: '', min: 0, deep: true, key: 'overall', dir: -1 };
 function viewScreener() {
   const v = $('#view');
   const sectors = [...new Set(ROWS.map(r => r.sector).filter(Boolean))].sort();
@@ -378,6 +428,7 @@ function viewScreener() {
     <div class="tools">
       <input id="sq" type="search" placeholder="Filter by name" value="${esc(sc.q)}" style="flex:1 1 180px" aria-label="Filter by name">
       <select id="ssig" aria-label="Signal"><option value="">All stocks</option>${[['BUY', 'Buy (any term)'], ['BUYL', 'Buy · long term'], ['BUYS', 'Buy · short term'], ['NOT', 'Not a buy'], ['MINE', 'In my portfolios']].map(([v, l]) => `<option value="${v}" ${sc.sig === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      <select id="scap" aria-label="Company size"><option value="">All sizes</option>${CAPS.slice(1).map(([k, l]) => `<option value="${k}" ${sc.cap === k ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <select id="ssec" aria-label="Sector"><option value="">All sectors</option>${sectors.map(s => `<option ${sc.sector === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select>
       <label class="hint inl">Min score <input id="smin" type="number" min="0" max="100" value="${sc.min}" style="width:70px"></label>
       <label class="hint inl"><input id="sdeep" type="checkbox" ${sc.deep ? 'checked' : ''}> Analysed only</label>
@@ -390,7 +441,7 @@ function viewScreener() {
     const q = sc.q.toLowerCase();
     const mine = heldSet();
     const sigOk = r => !sc.sig || (sc.sig === 'BUY' ? r.signal === 'BUY' : sc.sig === 'BUYL' ? r.signal === 'BUY' && r.horizon?.term === 'Long term' : sc.sig === 'BUYS' ? r.signal === 'BUY' && r.horizon?.term === 'Short term' : sc.sig === 'NOT' ? r.signal !== 'BUY' : mine.has(r.symbol));
-    const rows = ROWS.filter(r => (!sc.deep || r.stage >= 2) && sigOk(r) && (!sc.sector || r.sector === sc.sector) && (!sc.min || (r.overall || 0) >= sc.min) && (!q || `${r.symbol} ${r.name}`.toLowerCase().includes(q)))
+    const rows = ROWS.filter(r => (!sc.deep || r.stage >= 2) && sigOk(r) && (!sc.sector || r.sector === sc.sector) && (!sc.cap || r.cap === sc.cap) && (!sc.min || (r.overall || 0) >= sc.min) && (!q || `${r.symbol} ${r.name}`.toLowerCase().includes(q)))
       .sort((a, b) => { const x = a[sc.key], y = b[sc.key]; if (x == null) return 1; if (y == null) return -1; return (typeof x === 'string' ? x.localeCompare(y) : x - y) * sc.dir; });
     $('#st tbody').innerHTML = rows.slice(0, 300).map(r => `<tr class="click" data-s="${esc(r.symbol)}">
       <td><b>${esc(r.symbol)}</b><div class="muted" style="font-size:12px">${esc((r.name || '').slice(0, 30))}</div></td>
@@ -404,6 +455,7 @@ function viewScreener() {
   $('#sq').addEventListener('input', e => { sc.q = e.target.value; draw(); });
   $('#ssig').addEventListener('change', e => { sc.sig = e.target.value; draw(); });
   $('#ssec').addEventListener('change', e => { sc.sector = e.target.value; draw(); });
+  $('#scap').addEventListener('change', e => { sc.cap = e.target.value; draw(); });
   $('#smin').addEventListener('input', e => { sc.min = +e.target.value || 0; draw(); });
   $('#sdeep').addEventListener('change', e => { sc.deep = e.target.checked; draw(); });
   $('#st thead').addEventListener('click', e => { const th = e.target.closest('th'); if (!th) return; const k = th.dataset.k; sc.dir = sc.key === k ? -sc.dir : (['symbol', 'signal'].includes(k) ? 1 : -1); sc.key = k;
