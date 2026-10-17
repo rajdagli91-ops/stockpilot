@@ -24,7 +24,8 @@ SECTOR_CACHE = ROOT / "config" / "sectors.csv"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"}
 TS_URL = "https://query2.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries/{sym}"
 TYPES = ["annualTotalRevenue", "annualNetIncome", "annualStockholdersEquity", "annualTotalDebt",
-         "annualOperatingCashFlow", "annualOrdinarySharesNumber", "annualCashDividendsPaid", "annualOperatingIncome"]
+         "annualOperatingCashFlow", "annualOrdinarySharesNumber", "annualCashDividendsPaid", "annualOperatingIncome",
+         "quarterlyNetIncome", "quarterlyTotalRevenue"]
 
 # NSE industry names -> the sector names used by the global-markets module
 NSE_TO_SECTOR = {
@@ -68,12 +69,12 @@ def _cagr(series):
 
 
 # ---------------------------------------------------------------- prices
-def history(symbol: str, period: str = "2y") -> pd.DataFrame:
+def history(symbol: str, period: str = "5y") -> pd.DataFrame:
     df = yf.Ticker(_yahoo(symbol)).history(period=period, auto_adjust=True)
     return df[["Close", "Volume"]].dropna() if not df.empty else df
 
 
-def bulk_history(symbols, period: str = "2y", batch: int = 150) -> dict:
+def bulk_history(symbols, period: str = "5y", batch: int = 150) -> dict:
     """Prices for many symbols at once (one request per batch). Returns {symbol: DataFrame}."""
     out = {}
     for i in range(0, len(symbols), batch):
@@ -165,8 +166,11 @@ def _timeseries(ysym: str) -> tuple[dict, str | None]:
         vals = [v for v in (res.get(key) or []) if v and v.get("reportedValue")]
         vals.sort(key=lambda v: v["asOfDate"])
         if vals:
-            out[key] = [float(v["reportedValue"]["raw"]) for v in vals][-4:]
-            ccy = ccy or vals[-1].get("currencyCode")
+            n = 6 if key.startswith("quarterly") else 4
+            out[key] = [float(v["reportedValue"]["raw"]) for v in vals][-n:]
+            out[key + "_dates"] = [v["asOfDate"] for v in vals][-n:]
+            if key.startswith("annual"):
+                ccy = ccy or vals[-1].get("currencyCode")
     return out, ccy
 
 
@@ -203,4 +207,7 @@ def fundamentals(symbol: str, price: float | None = None) -> dict:
         "cash_conversion": (ocf / ni_last) if ocf is not None and ni_last and ni_last > 0 else (-1 if ni_last is not None and ni_last <= 0 else None),
         "loss_making": bool(ni_last is not None and ni_last <= 0),
         "years": len(rev) if rev else 0,
+        "ni_hist": [[d, v] for d, v in zip(ts.get("annualNetIncome_dates") or [], ni or [])],
+        "q_ni": ts.get("quarterlyNetIncome") or [], "q_rev": ts.get("quarterlyTotalRevenue") or [],
+        "q_dates": ts.get("quarterlyNetIncome_dates") or [],
     }

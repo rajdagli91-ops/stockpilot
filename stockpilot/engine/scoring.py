@@ -10,6 +10,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from engine import entry as entry_mod
+
+CTX: dict = {}  # shared entry-check context set by run.py: market regime, delivery, deals, screener, sector P/E
+
 SETTINGS = json.loads((Path(__file__).resolve().parent.parent / "config" / "settings.json").read_text())
 
 
@@ -41,9 +45,17 @@ def technicals(df: pd.DataFrame, bench: pd.DataFrame | None) -> dict:
         rel = ret12 - (float(b.iloc[-1]) / float(b.iloc[-look - 1]) - 1) * 100
     hi52 = float(c.iloc[-look:].max())
     vol = float(np.log(c).diff().iloc[-look:].std() * np.sqrt(252) * 100)
+    r = np.log(c).diff()
+    vol_ratio = float(r.iloc[-20:].std() / r.iloc[-120:].std()) if len(r) >= 120 and r.iloc[-120:].std() > 0 else None
+    acc = None
+    if "Volume" in df and len(df) >= 51:
+        v, ch = df["Volume"].iloc[-50:], c.diff().iloc[-50:]
+        up, dn = float(v[ch > 0].sum()), float(v[ch < 0].sum())
+        acc = up / dn if dn > 0 else None
     return {"price": last, "dma50": dma50, "dma200": dma200, "rsi": rsi, "ret_12m": ret12, "rel_12m": rel,
             "from_52w_high": (last / hi52 - 1) * 100, "volatility": vol,
-            "vs_200dma": (last / dma200 - 1) * 100 if dma200 else None}
+            "vs_200dma": (last / dma200 - 1) * 100 if dma200 else None,
+            "low20": float(c.iloc[-20:].min()), "vol_ratio": vol_ratio, "acc_ratio": acc}
 
 
 # ---------- 20% CAGR hurdle: expected annual return over the next ~5 years
@@ -115,7 +127,7 @@ def entry_timing(f: dict, t: dict, peg: float | None) -> dict | None:
             "peg": round(peg, 2) if peg is not None else None, "pe": round(f["pe"], 1) if f.get("pe") else None}
 
 
-def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None = None) -> dict:
+def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None = None, sym: str | None = None) -> dict:
     s = SETTINGS
     fin = (f.get("sector") or "").lower().startswith("financial")
     er = expected_return(f)
@@ -198,7 +210,9 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
                and (fund or 0) >= 55 and not red)
     short_ok = (st is not None and uptrend and rsi_ok and not red and (tech or 0) >= 65
                 and st["upside"] >= hz["short_term_min_return"] and (st["reward_risk"] or 0) >= 1.5)
-    entry = entry_timing(f, t, peg)
+    entry = entry_mod.summarize(entry_mod.build(sym, f, t, CTX), t)
+    if entry:
+        entry["pe"] = round(f["pe"], 1) if f.get("pe") else None
     if overall is None:
         signal, horizon = "NO DATA", None
     elif long_ok:

@@ -196,3 +196,22 @@ body.locked>header,body.locked>main,body.locked>#banner,body.locked>footer{displ
 .whybox .ph{font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
 .pickctl .tgt{display:inline-flex;flex-direction:row;align-items:center;gap:8px;font-weight:600}
 .pickctl .tgt input{width:72px}
+
+.efac summary,.echk summary{cursor:pointer;list-style:none}
+.efac summary::-webkit-details-marker,.echk summary::-webkit-details-marker{display:none}
+.efac summary::before,.echk summary::before{content:"▸ ";color:var(--muted)}
+.efac[open] summary::before,.echk[open] summary::before{content:"▾ "}
+.efgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:14px;margin-top:12px}
+.efgrid .ph{font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px}
+.ef{display:flex;gap:8px;align-items:flex-start;font-size:13px;padding:4px 0;cursor:pointer}
+.ef input{margin-top:3px}
+.echk{margin:8px 0;font-size:13px}
+.echk summary{padding:4px 0}
+.echk .hold{color:var(--hold)}
+.echkt{width:100%;border-collapse:collapse;margin-top:6px}
+.echkt td{padding:6px 6px;border-top:1px solid var(--line);vertical-align:top}
+.echkt td.ic{width:18px;font-weight:700;text-align:center}
+.echkt tr.good td.ic{color:var(--buy)} .echkt tr.bad td.ic{color:var(--sell)} .echkt tr.ok td.ic{color:var(--hold)} .echkt tr.na td.ic{color:var(--nodata)}
+.echkt tr.off{opacity:.45}
+.echkt td.num{white-space:nowrap;text-align:right;font-family:var(--mono);font-size:12px}
+@media (max-width:560px){.echkt td.num:last-child{display:none}}

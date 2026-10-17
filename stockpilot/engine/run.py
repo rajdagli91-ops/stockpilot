@@ -22,8 +22,10 @@ from pathlib import Path
 
 from engine import ipo as ipo_mod
 from engine import report as rpt
+from engine import entry as entry_mod
 from engine import scoring, secure, universe
 from engine.providers import bse as bse_p
+from engine.providers import nse_files, screener
 from engine.providers import global_mkts
 from engine.providers import news as news_p
 from engine.providers import yahoo
@@ -35,7 +37,7 @@ SCAN = S["scan"]
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 FIELDS = ["symbol", "name", "sector", "price", "overall", "signal", "confidence", "expected_return",
           "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event", "horizon",
-          "mcap_cr", "cap", "entry"]
+          "mcap_cr", "cap", "entry", "pe", "ec", "eg"]
 
 
 def fname(sym):
@@ -111,6 +113,7 @@ def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_new
     errors, f = [], {}
     try:
         f = prov.fundamentals(sym, t.get("price")) or {}
+        f["pe_history"] = pe_history(f, hist)
     except Exception as e:
         errors.append(f"fundamentals: {e}")
     headlines, filings = [], list(extra_filings)
@@ -127,7 +130,7 @@ def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_new
                 errors.append(f"filings: {e}")
     tilt = global_mkts.sector_tilt(market, f.get("sector"))
     why = ((market or {}).get("tilts") or {}).get(f.get("sector") or "", {}).get("why", [])
-    sc = scoring.score_stock(f, t, headlines, filings, {"score": tilt, "why": why} if tilt is not None else None)
+    sc = scoring.score_stock(f, t, headlines, filings, {"score": tilt, "why": why} if tilt is not None else None, sym)
     weekly = []
     if hist is not None and len(hist):
         w = hist["Close"].resample("W-FRI").last().dropna().iloc[-104:]
@@ -149,7 +152,50 @@ def row_from(d, base):
         r["mcap_cr"] = round(mc / 1e7)
     e = d.get("entry") or {}
     r["entry"] = e.get("score")
+    r["pe"] = (d.get("fundamentals") or {}).get("pe")
+    r["ec"], r["eg"] = entry_mod.compact(e.get("checks") or [])
     return r
+
+
+def pe_history(f, hist):
+    """P/E at each past financial year-end: today's P/E scaled by price then/now and profit now/then."""
+    pe, ni = f.get("pe"), f.get("ni_hist") or []
+    if not pe or pe <= 0 or len(ni) < 2 or hist is None or not len(hist):
+        return []
+    ni_now, px_now = ni[-1][1], float(hist["Close"].iloc[-1])
+    out = []
+    for d, v in ni[:-1]:
+        if not v or v <= 0 or not ni_now or ni_now <= 0:
+            continue
+        try:
+            px = hist["Close"][:d]
+            if not len(px):
+                continue
+            out.append(round(pe * (float(px.iloc[-1]) / px_now) * (ni_now / v), 1))
+        except Exception:
+            continue
+    return out
+
+
+def rebuild_entries(details, rows, ctx):
+    """Recompute every stock's entry checklist with the full context (sector P/E, screener, deals...)."""
+    by_sec = {}
+    for d in details.values():
+        f = d.get("fundamentals") or {}
+        if f.get("pe") and 0 < f["pe"] < 200 and f.get("sector"):
+            by_sec.setdefault(f["sector"], []).append(f["pe"])
+    import statistics
+    ctx["sector_pe"] = {k: statistics.median(v) for k, v in by_sec.items() if len(v) >= 5}
+    for sym, d in details.items():
+        t, f = d.get("technicals") or {}, d.get("fundamentals") or {}
+        e = entry_mod.summarize(entry_mod.build(sym, f, t, ctx), t)
+        if e:
+            e["pe"] = round(f["pe"], 1) if f.get("pe") else None
+            d["entry"] = e
+            if sym in rows:
+                rows[sym]["entry"] = e["score"]
+                rows[sym]["ec"], rows[sym]["eg"] = entry_mod.compact(e["checks"])
+                rows[sym]["pe"] = f.get("pe")
 
 
 def assign_caps(rows):
@@ -281,6 +327,30 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     except Exception as e:
         print(f"global markets skipped: {e}")
 
+    # ---- shared entry-check context: market regime, delivery %, bulk/block deals, screener cache
+    ctx = scoring.CTX
+    ctx.clear()
+    try:
+        vix = next((m.get("last") for m in market.get("markets", []) if m.get("key") == "india_vix"), None)
+        vix = vix if vix and 5 < vix < 80 else None
+        ctx["market"] = entry_mod.market_regime(bench["Close"] if bench is not None and len(bench) else None, vix)
+    except Exception as e:
+        print(f"market regime skipped: {e}")
+    if mode in ("full", "quick") and not sample:
+        try:
+            ctx["delivery"] = nse_files.delivery()
+        except Exception as e:
+            print(f"delivery skipped: {e}")
+        try:
+            ctx["deals"] = nse_files.merge_deals(jload(OUT / "deals.json", []), nse_files.deals())
+            jsave(OUT / "deals.json", ctx["deals"])
+        except Exception as e:
+            print(f"deals skipped: {e}")
+    else:
+        ctx["deals"] = jload(OUT / "deals.json", [])
+    ctx["screener"] = jload(OUT / "screener.json", {})
+    ctx["today"] = dt.datetime.now(IST).date()
+
     # ---- who to track: watchlist + your (encrypted) portfolios
     portfolios = load_portfolios()
     track = {r["symbol"].strip().upper(): r for r in universe.tracked()}
@@ -401,6 +471,22 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     if mode in ("full", "quick"):
         jsave(OUT / "events.json", {"updated": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"), "events": events[:200]}, compact=False)
 
+    # ---- screener.in (results date, shareholding) for the stocks that matter, then the full entry checklist
+    if not sample:
+        try:
+            cand = sorted((s_ for s_, r in rows.items() if (r.get("stage") or 0) >= 2 and r.get("signal") in ("BUY", "HOLD")
+                           and (r.get("expected_return") or 0) >= 12 and (r.get("traded_cr") or 0) >= SCAN["min_traded_cr"]),
+                          key=lambda s_: -((rows[s_].get("overall") or 0) * 0.55 + (rows[s_].get("entry") or 0) * 0.45))
+            order = list(dict.fromkeys(list(track) + cand[:250]))
+            ctx["screener"] = screener.refresh([s_ for s_ in order if not s_.endswith(".BO")], ctx.get("screener") or {},
+                                               max_fetch=150 if mode == "full" else 25)
+            jsave(OUT / "screener.json", ctx["screener"])
+        except Exception:
+            traceback.print_exc()
+    rebuild_entries(details, rows, ctx)
+    for sym, d in details.items():
+        jsave(sd / fname(sym), d)
+
     assign_caps(rows)
     picks, wait = choose_picks(rows, details)
     ipos = []
@@ -421,6 +507,10 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
         "deep": sum(1 for r in rows.values() if r.get("stage") == 3), "events": len(events),
         "mood": market.get("mood"), "bias": market.get("bias"),
         "weights": S["weights"], "thresholds": S["thresholds"], "scan": SCAN,
+        "entry_checks": [{"k": k, "label": v[0], "group": v[1], "w": v[2], "cap": v[3]} for k, v in entry_mod.CHECKS.items()],
+        "market_regime": ctx.get("market"),
+        "entry_sources": {"delivery_days": len(next(iter((ctx.get("delivery") or {}).values()), [])),
+                          "deals_30d": len(ctx.get("deals") or []), "screener_cached": len(ctx.get("screener") or {})},
     })
     if mode == "full":
         meta["last_full_scan"] = meta["updated"]

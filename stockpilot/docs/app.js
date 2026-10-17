@@ -32,6 +32,57 @@ const bar = v => `<div class="bar"><i><b style="width:${v ?? 0}%;background:${sc
 const norm = s => String(s || '').toUpperCase().replace(/LIMITED|LTD\.?|\bEQ\b|EQUITY|\(I\)|INDIA|&|[^A-Z0-9]/g, '');
 const fileOf = sym => 'data/stocks/' + encodeURIComponent(sym.replace(/&/g, '_')) + '.json';
 let pickPrefs = LS.get('pickPrefs', { tgt: null, cap: '' });
+// ---- entry checklist: every stock carries 17 entry checks; you choose which ones count
+let entryOn = LS.get('entryOn', null), efOpen = false;  // null = all on
+const ECHK = () => META.entry_checks || [];
+const isOn = k => !entryOn || entryOn.includes(k);
+function rescore(scores, gates) {
+  let num = 0, den = 0; const caps = [];
+  ECHK().forEach((c, i) => { if (!isOn(c.k)) return; const s = scores?.[i]; if (s != null && c.w) { num += s * c.w; den += c.w; } if (c.cap != null && (gates & (1 << i))) caps.push([c.cap, c.k]); });
+  if (!den) return { score: null, capped: [] };
+  let sc = num / den; caps.forEach(([cap]) => { sc = Math.min(sc, cap); });
+  return { score: Math.round(sc), capped: caps.map(x => x[1]) };
+}
+const rowEntry = r => (Array.isArray(r.ec) && ECHK().length) ? rescore(r.ec, r.eg || 0).score : (typeof r.entry === 'object' ? r.entry?.score : r.entry);
+function entryFromDetail(e) {
+  if (!e?.checks || !ECHK().length) return e;
+  const idx = Object.fromEntries(ECHK().map((c, i) => [c.k, i]));
+  const scores = ECHK().map(c => (e.checks.find(x => x.k === c.k) || {}).s ?? null);
+  const gates = e.checks.reduce((m, x) => x.g && idx[x.k] != null ? m | (1 << idx[x.k]) : m, 0);
+  const { score, capped } = rescore(scores, gates);
+  const z = e.zone ? `₹${n(e.zone[0], f0)}–${n(e.zone[1], f0)}` : '';
+  const res = e.checks.find(x => x.k === 'results');
+  const verdict = capped.includes('trend') ? 'Wait: trend is down; buy only after it turns up' : capped.includes('results') ? `Wait until results are out (${res?.v || ''})`
+    : capped.includes('hi52') ? `Near its 52-week high: wait for a dip to ${z}, or buy only in small parts` : capped.includes('vs200') ? `Over-stretched above its 200-day average: wait for a dip to ${z}`
+    : score >= 65 ? 'Good entry now' : score >= 50 ? 'Fair entry: buy in 2–3 parts' : `Wait for a dip to ${z}`;
+  const on = e.checks.filter(c => isOn(c.k));
+  return { ...e, score, verdict, capped_by: capped, good: on.filter(c => c.st === 'good').sort((a, b) => b.s - a.s).slice(0, 3).map(c => c.why), why: on.filter(c => c.st === 'bad').sort((a, b) => a.s - b.s).slice(0, 3).map(c => c.why) };
+}
+function checklistHtml(e, open = false) {
+  if (!e?.checks?.length || !ECHK().length) return '';
+  const icon = st => ({ good: '✓', ok: '•', bad: '✗', na: '–' })[st] || '–';
+  const on = e.checks.filter(c => isOn(c.k)), cnt = st => on.filter(c => c.st === st).length;
+  const missing = ECHK().filter(c => isOn(c.k) && !e.checks.some(x => x.k === c.k)).length;
+  return `<details class="echk" ${open ? 'open' : ''}><summary><span class="pos">✓ ${cnt('good')} good</span> · <span class="hold">• ${cnt('ok')} neutral</span> · <span class="neg">✗ ${cnt('bad')} against</span>${missing ? ` · <span class="muted">${missing} no data</span>` : ''} <span class="hint">· all entry checks</span></summary>
+    <table class="echkt"><tbody>${ECHK().map(c => { const x = e.checks.find(y => y.k === c.k), off = !isOn(c.k); return `<tr class="${x ? x.st : 'na'}${off ? ' off' : ''}"><td class="ic">${x ? icon(x.st) : '–'}</td><td><b>${esc(c.label)}</b>${off ? ' <span class="muted">(switched off)</span>' : ''}${c.cap != null && x?.g && !off ? ' <span class="pill SELL">blocks entry</span>' : ''}<div class="hint">${esc(x ? x.why : 'No data for this stock yet')}</div></td><td class="num">${esc(x ? x.v : '—')}</td><td class="num">${x?.s ?? '—'}</td></tr>`; }).join('')}</tbody></table></details>`;
+}
+function entryFactorsHtml() {
+  if (!ECHK().length) return '';
+  const groups = [...new Set(ECHK().map(c => c.group))], nOn = ECHK().filter(c => isOn(c.k)).length;
+  return `<details class="card efac" id="efac" ${efOpen ? 'open' : ''}><summary><b>Entry factors</b> <span class="hint">${nOn} of ${ECHK().length} switched on · tap to choose which ones decide the entry score</span></summary>
+    <div class="efgrid">${groups.map(g => `<div><div class="ph">${esc(g)}</div>${ECHK().filter(c => c.group === g).map(c => `<label class="ef"><input type="checkbox" data-ef="${c.k}" ${isOn(c.k) ? 'checked' : ''}> <span>${esc(c.label)} <span class="muted">×${c.w}${c.cap != null ? ' · can block' : ''}</span></span></label>`).join('')}</div>`).join('')}</div>
+    <div class="tools" style="margin-top:10px"><button class="btn ghost small" id="efall">Switch all on</button><span class="hint">×N = how much it counts. "Can block" = when it fails, the stock can't be a top pick however good the rest looks (at its 52-week high, over 40% above its 200-day average, results within 7 days, or a falling trend).</span></div></details>`;
+}
+function wireEntryFactors(v, redraw) {
+  const box = v.querySelector('#efac'); if (!box) return;
+  box.addEventListener('toggle', () => { efOpen = box.open; });
+  box.querySelectorAll('[data-ef]').forEach(cb => cb.addEventListener('change', () => {
+    const on = [...box.querySelectorAll('[data-ef]')].filter(x => x.checked).map(x => x.dataset.ef);
+    entryOn = on.length === ECHK().length ? null : on; LS.set('entryOn', entryOn); efOpen = true; redraw();
+  }));
+  box.querySelector('#efall').addEventListener('click', e => { e.preventDefault(); entryOn = null; LS.set('entryOn', null); efOpen = true; redraw(); });
+}
+
 const target = () => pickPrefs.tgt || META.target_cagr || 18;
 const heldSet = () => new Set(portfolios.flatMap(p => p.holdings.map(h => h.symbol)));
 // Hold / Exit only make sense for stocks you own; anything else is Buy or Not a buy.
@@ -358,20 +409,21 @@ function computePicks() {
   const pool = ROWS.filter(r => (r.stage || 0) >= 2 && r.overall != null && r.expected_return != null && r.expected_return >= tgt
     && (r.signal === 'BUY' || (r.signal === 'HOLD' && r.overall >= 60)) && ['High', 'Medium'].includes(r.confidence)
     && (r.traded_cr || 0) >= minT && (!cap || r.cap === cap));
-  const rank = r => 0.55 * r.overall + 0.45 * r.entry;
-  const ready = pool.filter(r => r.entry != null && r.entry >= minE).sort((x, y) => rank(y) - rank(x));
+  pool.forEach(r => { r._e = rowEntry(r); });
+  const rank = r => 0.55 * r.overall + 0.45 * r._e;
+  const ready = pool.filter(r => r._e != null && r._e >= minE).sort((x, y) => rank(y) - rank(x));
   const picks = [], secs = {};
   for (const r of ready) { const k = r.sector || 'Other'; if ((secs[k] || 0) >= perSec) continue; picks.push(r); secs[k] = (secs[k] || 0) + 1; if (picks.length === 5) break; }
-  const wait = pool.filter(r => r.entry != null && r.entry < minE).sort((x, y) => y.overall - x.overall).slice(0, 8);
+  const wait = pool.filter(r => r._e != null && r._e < minE).sort((x, y) => y.overall - x.overall).slice(0, 8);
   return { live, picks, wait, pool: pool.length };
 }
 function pickCard(x, d, i) {
-  const t = d?.technicals || {}, e = d?.entry || x.entry || null, ent = typeof e === 'object' ? e : null;
+  const t = d?.technicals || {}, e = d?.entry || x.entry || null, ent = typeof e === 'object' ? entryFromDetail(e) : null;
   const pts = d?.points || x.points;
   return `<a class="ph" href="#stock/${encodeURIComponent(x.symbol)}"><div><span class="rank">#${i + 1}</span> <b class="sym">${esc(x.symbol)}</b><div class="muted nm">${esc(x.name || '')}</div></div><div class="big" style="color:${scoreColor(x.overall)}">${Math.round(x.overall)}</div></a>
     <div class="pm">${pill(x.signal)} <span class="hint">${esc(x.confidence || '')} confidence · ${esc(x.sector || '')}${x.cap ? ' · ' + esc(capText(x)) : ''}</span></div>
     ${hzLine(d?.horizon || x.horizon)}
-    ${ent ? entryHtml(ent) : (typeof e === 'number' ? `<div class="hint">Entry timing ${e}/100</div>` : '')}
+    ${ent ? entryHtml(ent) + checklistHtml(ent) : (x._e != null || typeof e === 'number' ? `<div class="hint">Entry timing ${x._e ?? e}/100 · loading checks…</div>` : '')}
     <dl><dt>Expected return</dt><dd class="${x.expected_return >= target() ? 'pos' : ''}">${pc(x.expected_return)}/yr</dd>
       <dt>P/E · PEG</dt><dd>${n(ent?.pe, f0)} · ${ent?.peg != null ? ent.peg.toFixed(1) : '—'}</dd>
       <dt>12 months</dt><dd>${pc(x.ret_12m)}</dd><dt>vs 50-day avg</dt><dd>${pc(ent?.vs_50dma)}</dd><dt>vs 200-day avg</dt><dd>${pc(t.vs_200dma ?? x.vs_200dma)}</dd><dt>RSI</dt><dd>${n(t.rsi ?? x.rsi, f0)}</dd></dl>
@@ -407,13 +459,14 @@ function viewPicks() {
       </div>
       <p class="hint" style="margin:8px 0 0">${live ? `${pool} stocks expect at least ${target()}%/yr with a buy-quality score${pickPrefs.cap ? ' in ' + esc(pickPrefs.cap) + ' cap' : ''}; the best ${picks.length} at a sensible price are below. Large = top 100 companies by market value, Mid = 101–250, Small = 251–500, Micro = the rest.` : 'The size filter and live target turn on after the next full scan (Monday 7:15 AM, or Fetch → Fetch full market).'}</p>
     </div>
+    ${entryFactorsHtml()}
     ${MARKET.mood != null ? `<a class="moodbar" href="#market"><span>Global markets</span><b style="color:${scoreColor(MARKET.mood)}">${MARKET.mood}/100 · ${esc(MARKET.bias)}</b><span class="muted">${esc((MARKET.markets || []).filter(x => ['sp500', 'nasdaq', 'nikkei', 'brent', 'usdinr'].includes(x.key)).map(x => x.label + ' ' + pc(x.chg_1d)).join(' · '))}</span></a>` : ''}
     ${picks.length ? `<div class="picks">${picks.map((x, i) => `<div class="pick" id="pk${i}">${pickCard(x, null, i)}</div>`).join('')}</div>
       <p class="hint">Picks need: expected return of at least ${target()}%/yr, a buy-quality score, an entry-timing score of at least ${META.scan?.min_entry_score ?? 55} (price not stretched vs its averages, RSI not overheated, P/E reasonable for its growth, trend up), Medium or High confidence, at least ₹${META.scan?.min_traded_cr ?? 2} Cr traded daily, and at most ${META.scan?.max_picks_per_sector ?? 2} per sector. ${picks.length < 5 ? `Only ${picks.length} stocks cleared the bar; the system doesn't pad the list.` : ''}</p>`
       : `<div class="card empty">${ROWS.length ? `No stock cleared the bar${pickPrefs.cap ? ' in ' + esc(pickPrefs.cap) + ' cap' : ''} at ${target()}%/yr. Try a lower target or another size; the system won't force picks.` : 'Run the first full scan to see picks.'}</div>`}
     ${wait.length ? `<div class="card"><div class="cardhead"><h2>Good businesses, wrong price today</h2><span class="hint">Meet your target, but stretched right now. Buy near the zone, not at today's price.</span></div>
       <div class="tbox"><table><thead><tr><th>Stock</th><th class="num">Score</th><th class="num">Entry</th><th class="num">Price</th><th class="num">Buy zone</th><th class="hide-sm">Why wait</th></tr></thead><tbody id="waitb">
-      ${wait.map(x => { const e = typeof x.entry === 'object' ? x.entry : null; return `<tr class="click" data-s="${esc(x.symbol)}"><td><b>${esc(x.symbol)}</b><div class="muted" style="font-size:12px">${esc((x.name || '').slice(0, 28))}${x.cap ? ' · ' + esc(x.cap) : ''}</div></td><td class="num">${Math.round(x.overall)}</td><td class="num">${e ? e.score : x.entry ?? '—'}</td><td class="num">${n(x.price, f0)}</td><td class="num" data-zone>${e?.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '…'}</td><td class="hide-sm" data-why style="white-space:normal;min-width:200px">${esc((e?.why || []).join('; '))}</td></tr>`; }).join('')}</tbody></table></div></div>` : ''}
+      ${wait.map(x => { const e = typeof x.entry === 'object' ? x.entry : null; return `<tr class="click" data-s="${esc(x.symbol)}"><td><b>${esc(x.symbol)}</b><div class="muted" style="font-size:12px">${esc((x.name || '').slice(0, 28))}${x.cap ? ' · ' + esc(x.cap) : ''}</div></td><td class="num">${Math.round(x.overall)}</td><td class="num">${x._e ?? (e ? e.score : x.entry) ?? '—'}</td><td class="num">${n(x.price, f0)}</td><td class="num" data-zone>${e?.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '…'}</td><td class="hide-sm" data-why style="white-space:normal;min-width:200px">${esc((e?.why || []).join('; '))}</td></tr>`; }).join('')}</tbody></table></div></div>` : ''}
     ${IPOS.filter(x => x.call === 'APPLY').length ? `<div class="card"><div class="cardhead"><h2>IPOs worth applying for</h2><a href="#ipos">All IPOs →</a></div><div class="syms">${IPOS.filter(x => x.call === 'APPLY').map(x => `<a href="#ipos">${esc(x.name)} · ${x.score}</a>`).join('')}</div></div>` : ''}
     <div class="card"><div class="cardhead"><h2>Your portfolio today: ${esc(pf?.name || '')}</h2><a href="#portfolios">Open portfolio →</a></div>${pf ? reportHtml(pf, true) : ''}</div>`;
   wireSync(v);
@@ -423,6 +476,7 @@ function viewPicks() {
   tg.addEventListener('change', () => { const t = Math.max(5, Math.min(60, Math.round(+tg.value || 0))); pickPrefs.tgt = t; LS.set('pickPrefs', pickPrefs); viewPicks(); });
   $('#pcap').addEventListener('click', e => { const b = e.target.closest('button[data-cap]'); if (!b) return; pickPrefs.cap = b.dataset.cap; LS.set('pickPrefs', pickPrefs); viewPicks(); });
   $('#ptgtsave').addEventListener('click', () => saveTargetDefault(target()));
+  wireEntryFactors(v, viewPicks);
   if (!live) return;
   picks.forEach(async (x, i) => { const d = await loadDetail(x.symbol).catch(() => null); const el = document.getElementById('pk' + i); if (el && d) { el.innerHTML = pickCard(x, d, i); wireClaude(el, async sym => stockPrompt(await loadDetail(sym) || BY.get(sym))); } });
   v.querySelectorAll('#waitb tr[data-s]').forEach(async tr => { const d = await loadDetail(tr.dataset.s).catch(() => null); const e = d?.entry; if (!e) return; tr.querySelector('[data-zone]').textContent = e.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '—'; tr.querySelector('[data-why]').textContent = (e.why || []).join('; '); });
@@ -552,13 +606,14 @@ async function viewStock(sym) {
       <p class="sub">${esc(d.sector || '')}${d.industry ? ' · ' + esc(d.industry) : ''} · ₹${n(d.price)} · ${stageLabel(d.stage)} · analysed ${esc(d.analysed || '')}</p></div>
     <div class="card verdict">
       <div class="big" style="color:${scoreColor(d.overall)}">${d.overall ?? '—'}</div>
-      <div><div class="sig">${pill(sigLabel(d.symbol, d.signal))}</div>${d.signal === 'BUY' || h ? hzLine(d.horizon) : ''}${entryHtml(d.entry)}<div class="hint" style="margin-top:6px">Confidence <b>${esc(d.confidence)}</b> · data coverage ${Math.round((d.coverage || 0) * 100)}%</div></div>
-      <div style="flex:1 1 260px;min-width:0"><div class="hint">Expected return vs your 15–18% target</div>
+      <div><div class="sig">${pill(sigLabel(d.symbol, d.signal))}</div>${d.signal === 'BUY' || h ? hzLine(d.horizon) : ''}${entryHtml(entryFromDetail(d.entry))}<div class="hint" style="margin-top:6px">Confidence <b>${esc(d.confidence)}</b> · data coverage ${Math.round((d.coverage || 0) * 100)}%</div></div>
+      <div style="flex:1 1 260px;min-width:0"><div class="hint">Expected return vs your ${target()}% target</div>
         <div class="mono ${d.expected_return >= target() ? 'pos' : 'neg'}" style="font-size:22px">${pc(d.expected_return)} / yr</div>
         <div class="hint">Strong: ${esc((d.strengths || []).join(', '))}<br>Weak: ${esc((d.weaknesses || []).join(', '))}</div></div>
       <button class="btn ghost" id="analyse">Refresh analysis</button>
     </div>
     ${h ? `<div class="banner" style="margin:0">You hold ${n(h.qty, f0)} shares at ₹${n(h.avg)} · P&L ${pc(d.price && h.avg ? (d.price / h.avg - 1) * 100 : null)} · Action: ${pill(actionFor(BY.get(d.symbol) || d, 0))}</div>` : ''}
+    ${d.entry?.checks ? `<div class="card"><div class="cardhead"><h2>Entry checklist: is now a good time to buy?</h2><a href="#picks">Choose factors →</a></div>${checklistHtml(entryFromDetail(d.entry), true)}</div>` : ''}
     <div class="card"><h2>${h ? 'Buy more, hold or exit' : 'Buy or not'}: the reasons</h2>${pointsHtml(d.points ? { ...d.points, verdict: h ? d.points.verdict : (d.points.verdict_new || d.points.verdict) } : null) || '<p class="muted">No reasons yet.</p>'}</div>
     <div class="grid2">
       <div class="card"><h2>Parameter ratings</h2><p class="sub">Each rated 0–100. ×weight shows how much it counts.</p>
