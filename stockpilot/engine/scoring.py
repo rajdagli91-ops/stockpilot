@@ -66,6 +66,49 @@ def expected_return(f: dict) -> float | None:
     return min(g + dy + rerate, 35.0)  # anything above 35%/yr is noise, not a forecast
 
 
+# ---------- entry timing: is today's price a sensible place to start buying?
+def entry_timing(f: dict, t: dict, peg: float | None) -> dict | None:
+    price, d50, d200 = t.get("price"), t.get("dma50"), t.get("dma200")
+    if not price or not d50:
+        return None
+    ext50 = (price / d50 - 1) * 100
+    ext200, rsi, hi = t.get("vs_200dma"), t.get("rsi"), t.get("from_52w_high")
+    parts = [("vs 50-day avg", interp(ext50, [(-10, 35), (-4, 70), (0, 95), (5, 90), (10, 60), (15, 30), (25, 5)]), 3,
+              f"{ext50:+.0f}% vs 50-day avg")]
+    if ext200 is not None:
+        parts.append(("vs 200-day avg", interp(ext200, [(-15, 15), (-5, 40), (0, 70), (8, 95), (20, 80), (30, 45), (45, 10)]), 2,
+                      f"{ext200:+.0f}% vs 200-day avg"))
+    if rsi is not None:
+        parts.append(("RSI", interp(rsi, [(25, 40), (35, 75), (45, 95), (58, 85), (65, 55), (72, 25), (80, 5)]), 2, f"RSI {rsi:.0f}"))
+    if hi is not None:
+        parts.append(("52-week high", interp(hi, [(-45, 15), (-30, 45), (-18, 85), (-8, 95), (-3, 70), (0, 60)]), 1,
+                      f"{-hi:.0f}% below 52-week high" if hi < -1 else "at 52-week high"))
+    if peg is not None and peg > 0:
+        parts.append(("PEG", interp(peg, [(0.5, 100), (1, 85), (1.5, 65), (2, 40), (3, 15), (4, 5)]), 3,
+                      f"P/E is {peg:.1f}× its growth rate"))
+    elif f.get("loss_making"):
+        parts.append(("PEG", 10, 3, "loss-making, no P/E"))
+    score = sum(p[1] * p[2] for p in parts) / sum(p[2] for p in parts)
+    trend_ok = bool(d200 and price > d200 and d50 > d200)
+    if not trend_ok:
+        score = min(score, 45)  # don't buy into a falling trend
+    lo, hi_z = round(d50 * 0.98, 2), round(d50 * 1.04, 2)
+    if score >= 65:
+        verdict = "Good entry now"
+    elif score >= 50:
+        verdict = "Fair entry: buy in 2–3 parts"
+    elif not trend_ok:
+        verdict = "Wait: trend is down; buy only after it turns up"
+    else:
+        verdict = f"Wait for a dip to ₹{lo:,.0f}–{hi_z:,.0f}"
+    weak = sorted((p for p in parts if p[1] < 50), key=lambda p: p[1])
+    good = sorted((p for p in parts if p[1] >= 75), key=lambda p: -p[1])
+    why = [p[3] for p in weak[:3]] + ([] if trend_ok else ["price below its 200-day avg or 50-day below 200-day"])
+    return {"score": round(score), "verdict": verdict, "zone": [lo, hi_z], "trend_ok": trend_ok,
+            "why": why, "good": [p[3] for p in good[:3]], "vs_50dma": round(ext50, 1),
+            "peg": round(peg, 2) if peg is not None else None, "pe": round(f["pe"], 1) if f.get("pe") else None}
+
+
 def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None = None) -> dict:
     s = SETTINGS
     fin = (f.get("sector") or "").lower().startswith("financial")
@@ -149,6 +192,7 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
                and (fund or 0) >= 55 and not red)
     short_ok = (st is not None and uptrend and rsi_ok and not red and (tech or 0) >= 65
                 and st["upside"] >= hz["short_term_min_return"] and (st["reward_risk"] or 0) >= 1.5)
+    entry = entry_timing(f, t, peg)
     if overall is None:
         signal, horizon = "NO DATA", None
     elif long_ok:
@@ -156,8 +200,10 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
         strong = er >= hz["long_term_good_cagr"]
         horizon = {"term": "Long term", "period": "3+ years", "expected": round(er, 1),
                    "note": f"Expected ~{er:.0f}%/yr" + (" (strong)" if strong else "") + ". Review after each quarterly result."}
-        if t.get("rsi") and t["rsi"] > 70:
-            horizon["note"] += " Overbought now: buy in 2–3 tranches or on a dip."
+        if entry and entry["score"] < 50:
+            horizon["note"] += f" Entry: {entry['verdict'][0].lower() + entry['verdict'][1:]}."
+        elif entry and entry["score"] < 65:
+            horizon["note"] += " Entry is fair: buy in 2–3 parts."
     elif short_ok:
         signal = "BUY"
         horizon = {"term": "Short term", "period": "1–3 months", "expected": st["upside"], "target": st["target"], "stop": st["stop"],
@@ -195,7 +241,7 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
         "news": round(nws, 1) if nws is not None else None,
         "signal": signal, "confidence": conf, "coverage": round(coverage, 2),
         "expected_return": round(er, 1) if er is not None else None,
-        "horizon": horizon, "short_term": st,
+        "horizon": horizon, "short_term": st, "entry": entry,
         "strengths": [v[0] for _, v in ranked[::-1][:2]],
         "weaknesses": [v[0] for _, v in ranked[:2]],
         "points": action_points(params, signal, er, t, flags, (macro or {}).get("why") or [], horizon),
