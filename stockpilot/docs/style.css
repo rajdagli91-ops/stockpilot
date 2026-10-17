@@ -183,3 +183,6 @@ body.locked>header,body.locked>main,body.locked>#banner,body.locked>footer{displ
 .login label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--muted)}
 .login label.inl{flex-direction:row;align-items:center}
 .login .brand{font-size:26px}
+.entry{border-left:3px solid var(--nodata);padding:6px 10px;border-radius:6px;background:rgba(127,127,127,.06);font-size:13px;line-height:1.45}
+.entry.good{border-color:var(--buy)}.entry.fair{border-color:#e0b341}.entry.wait{border-color:var(--sell)}
+.entry .hint{margin-top:2px}
