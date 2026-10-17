@@ -16,7 +16,7 @@ let aliases = LS.get('aliases', {});
 const guess = (() => { const h = location.hostname.match(/^([^.]+)\.github\.io$/); return h ? { owner: h[1], repo: location.pathname.split('/')[1] || '' } : {}; })();
 const settings = Object.assign({ model: 'claude-haiku-5-5', key: '', maxTokens: 350, ghOwner: guess.owner || '', ghRepo: guess.repo || '', ghToken: '', pass: '' }, LS.get('settings', {}));
 const saveSettings = () => LS.set('settings', settings);
-const savePf = () => { LS.set('portfolios', portfolios); LS.set('pfUpdated', Date.now()); scheduleCloudSave(); };
+const savePf = () => { _held = null; LS.set('portfolios', portfolios); LS.set('pfUpdated', Date.now()); scheduleCloudSave(); };
 
 // ================================================================ helpers
 const $ = (s, el = document) => el.querySelector(s);
@@ -44,6 +44,67 @@ function rescore(scores, gates) {
   return { score: Math.round(sc), capped: caps.map(x => x[1]) };
 }
 const rowEntry = r => (Array.isArray(r.ec) && ECHK().length) ? rescore(r.ec, r.eg || 0).score : (typeof r.entry === 'object' ? r.entry?.score : r.entry);
+// ---- the same 17 factors from a holder's side: hold score (high = keep, low = exit pressure) + "stretched/expensive" trim flags
+const HCAP = () => META.hold_caps || { trend: 40 };
+function rescoreHold(xc, gates, trims) {
+  let num = 0, den = 0; const capped = [], tr = [];
+  ECHK().forEach((c, i) => {
+    if (!isOn(c.k)) return; const s = xc?.[i];
+    if (s != null && c.w) { num += s * c.w; den += c.w; }
+    if (HCAP()[c.k] != null && (gates & (1 << i))) capped.push(c.k);
+    if (trims & (1 << i)) tr.push(c.k);
+  });
+  if (!den) return null;
+  let sc = num / den; capped.forEach(k => { sc = Math.min(sc, HCAP()[k]); });
+  return { score: Math.round(sc), capped, trims: tr, broken: capped.includes('trend') };
+}
+const rowHold = r => (r && Array.isArray(r.xc) && ECHK().length) ? rescoreHold(r.xc, r.eg || 0, r.xt || 0) : null;
+// One call per holding, used everywhere (portfolio table, stock page, screener), so labels never disagree.
+function holdCall(s, w = 0) {
+  if (!s || (s.stage || 0) < 2 || !s.signal || s.signal === 'SCAN' || s.signal === 'NO DATA') return 'NOT ANALYSED';
+  const h = rowHold(s), hs = h?.score, e = rowEntry(s);
+  if (s.signal === 'SELL') return hs != null && hs >= 55 && !h.broken ? 'EXIT (no rush)' : 'EXIT';
+  if (hs != null && hs < 35) return 'CONSIDER EXIT';
+  if (h && h.trims.length >= 2 && !h.broken) return 'BOOK PART PROFIT';
+  if (s.signal === 'BUY') {
+    if (w >= 0.08) return 'HOLD (already large)';
+    if (s.horizon?.term === 'Short term') return 'SHORT-TERM TRADE';
+    return e != null && e < (META.scan?.min_entry_score ?? 55) ? 'HOLD (add on dip)' : 'ADD MORE';
+  }
+  if (s.expected_return != null && s.expected_return < 12) return 'HOLD / REVIEW';
+  return 'HOLD';
+}
+let _held = null, _heldKey = '';
+function heldWeights() {  // symbol -> largest weight across your portfolios
+  const key = (META.updated || '') + '|' + JSON.stringify(entryOn);
+  if (_held && _heldKey === key) return _held;
+  _held = new Map(); _heldKey = key;
+  portfolios.forEach(p => pfStats(p).rows.forEach(r => _held.set(r.symbol, Math.max(_held.get(r.symbol) || 0, r.w))));
+  return _held;
+}
+function holdFromDetail(e) {
+  if (!e?.checks || !ECHK().length || !e.checks.some(c => 'x' in c)) return null;
+  const idx = Object.fromEntries(ECHK().map((c, i) => [c.k, i]));
+  const xc = ECHK().map(c => (e.checks.find(x => x.k === c.k) || {}).x ?? null);
+  const g = e.checks.reduce((m, x) => x.xg && idx[x.k] != null ? m | (1 << idx[x.k]) : m, 0);
+  const t = e.checks.reduce((m, x) => x.t && idx[x.k] != null ? m | (1 << idx[x.k]) : m, 0);
+  const h = rescoreHold(xc, g, t); if (!h) return null;
+  const on = e.checks.filter(c => isOn(c.k));
+  h.verdict = h.score < 35 ? (h.broken ? 'Exit warning: trend broken and several factors weak' : 'Exit warning: several factors weak')
+    : h.trims.length >= 2 && !h.broken ? 'Stretched or expensive: consider booking part profit' : h.score < 50 ? (h.broken ? 'Trend broken: watch closely' : 'Weakening: watch closely') : 'Healthy: keep holding';
+  h.good = on.filter(c => c.xst === 'good').sort((a, b) => b.x - a.x).slice(0, 3).map(c => c.xw);
+  h.why = on.filter(c => c.xst === 'bad').sort((a, b) => a.x - b.x).slice(0, 3).map(c => c.xw);
+  h.checks = e.checks;
+  return h;
+}
+const holdHtml = h => !h ? '' : `<div class="entry ${h.score >= 60 ? 'good' : h.score >= 40 ? 'fair' : 'wait'}"><div><b>Hold score ${h.score}/100</b> · ${esc(h.verdict)}</div>${h.good.length ? `<div class="hint">✓ ${esc(h.good.join(' · '))}</div>` : ''}${h.why.length ? `<div class="hint">✗ ${esc(h.why.join(' · '))}</div>` : ''}</div>`;
+function holdChecklistHtml(h, open = false) {
+  if (!h?.checks?.length) return '';
+  const icon = st => ({ good: '✓', ok: '•', bad: '✗', na: '–' })[st] || '–';
+  const on = h.checks.filter(c => isOn(c.k)), cnt = st => on.filter(c => c.xst === st).length;
+  return `<details class="echk" ${open ? 'open' : ''}><summary><span class="pos">✓ ${cnt('good')} keep</span> · <span class="hold">• ${cnt('ok')} neutral</span> · <span class="neg">✗ ${cnt('bad')} sell pressure</span> <span class="hint">· all hold / exit checks</span></summary>
+    <table class="echkt"><tbody>${ECHK().map(c => { const x = h.checks.find(y => y.k === c.k), off = !isOn(c.k), st = x ? x.xst : 'na'; return `<tr class="${st}${off ? ' off' : ''}"><td class="ic">${icon(st)}</td><td><b>${esc(c.label)}</b>${off ? ' <span class="muted">(switched off)</span>' : ''}${x?.xg && !off ? ' <span class="pill SELL">exit warning</span>' : ''}${x?.t && !off ? ' <span class="pill HOLD">book profit</span>' : ''}<div class="hint">${esc(x ? x.xw || x.why : 'No data for this stock yet')}</div></td><td class="num">${esc(x ? x.v : '—')}</td><td class="num">${x?.x ?? '—'}</td></tr>`; }).join('')}</tbody></table></details>`;
+}
 function entryFromDetail(e) {
   if (!e?.checks || !ECHK().length) return e;
   const idx = Object.fromEntries(ECHK().map((c, i) => [c.k, i]));
@@ -69,7 +130,7 @@ function checklistHtml(e, open = false) {
 function entryFactorsHtml() {
   if (!ECHK().length) return '';
   const groups = [...new Set(ECHK().map(c => c.group))], nOn = ECHK().filter(c => isOn(c.k)).length;
-  return `<details class="card efac" id="efac" ${efOpen ? 'open' : ''}><summary><b>Entry factors</b> <span class="hint">${nOn} of ${ECHK().length} switched on · tap to choose which ones decide the entry score</span></summary>
+  return `<details class="card efac" id="efac" ${efOpen ? 'open' : ''}><summary><b>Entry &amp; exit factors</b> <span class="hint">${nOn} of ${ECHK().length} switched on · tap to choose which ones decide the entry score (top picks) and the hold score (portfolio calls)</span></summary>
     <div class="efgrid">${groups.map(g => `<div><div class="ph">${esc(g)}</div>${ECHK().filter(c => c.group === g).map(c => `<label class="ef"><input type="checkbox" data-ef="${c.k}" ${isOn(c.k) ? 'checked' : ''}> <span>${esc(c.label)} <span class="muted">×${c.w}${c.cap != null ? ' · can block' : ''}</span></span></label>`).join('')}</div>`).join('')}</div>
     <div class="tools" style="margin-top:10px"><button class="btn ghost small" id="efall">Switch all on</button><span class="hint">×N = how much it counts. "Can block" = when it fails, the stock can't be a top pick however good the rest looks (at its 52-week high, over 40% above its 200-day average, results within 7 days, or a falling trend).</span></div></details>`;
 }
@@ -86,7 +147,12 @@ function wireEntryFactors(v, redraw) {
 const target = () => pickPrefs.tgt || META.target_cagr || 18;
 const heldSet = () => new Set(portfolios.flatMap(p => p.holdings.map(h => h.symbol)));
 // Hold / Exit only make sense for stocks you own; anything else is Buy or Not a buy.
-const sigLabel = (sym, sig) => !sig || sig === 'SCAN' || sig === 'NO DATA' ? (sig || 'NO DATA') : sig === 'BUY' ? 'BUY' : heldSet().has(sym) ? (sig === 'SELL' ? 'EXIT' : 'HOLD') : 'NOT A BUY';
+const sigLabel = (sym, sig) => {
+  if (!sig || sig === 'SCAN' || sig === 'NO DATA') return sig || 'NO DATA';
+  const w = heldWeights();
+  if (w.has(sym)) return holdCall(BY.get(sym) || { signal: sig, stage: 2 }, w.get(sym));  // you own it: show your holding's call
+  return sig === 'BUY' ? 'BUY' : 'NOT A BUY';
+};
 const hzText = h => h ? `${h.term} · ${h.period}` : '';
 const entryHtml = e => !e ? '' : `<div class="entry ${e.score >= 65 ? 'good' : e.score >= 50 ? 'fair' : 'wait'}"><div><b>Entry timing ${e.score}/100</b> · ${esc(e.verdict)}</div>${(e.good || []).length ? `<div class="hint">✓ ${esc(e.good.join(' · '))}</div>` : ''}${(e.why || []).length ? `<div class="hint">✗ ${esc(e.why.join(' · '))}</div>` : ''}${e.score < 65 && e.zone ? `<div class="hint">Buy zone near the 50-day avg: ₹${n(e.zone[0], f0)}–${n(e.zone[1], f0)}</div>` : ''}</div>`;
 const hzLine = h => {
@@ -302,13 +368,18 @@ function pfStats(p) {
 function dailyReport(p) {
   const st = pfStats(p), dataDate = (META.updated || '').slice(0, 10);
   const snaps = LS.get('snap', {}), sn = snaps[p.id] || {};
-  const cur = Object.fromEntries(st.rows.filter(r => r.s?.stage >= 2).map(r => [r.symbol, r.s.signal]));
+  st.rows.forEach(r => { r.action = holdCall(r.s, r.w); });
+  const cur = Object.fromEntries(st.rows.filter(r => r.s?.stage >= 2).map(r => [r.symbol, r.action]));
   if (dataDate && sn.curDate !== dataDate) { sn.prev = sn.cur || {}; sn.prevDate = sn.curDate; sn.cur = cur; sn.curDate = dataDate; snaps[p.id] = sn; LS.set('snap', snaps); }
   const changes = Object.entries(cur).filter(([k, v]) => sn.prev && sn.prev[k] && sn.prev[k] !== v).map(([k, v]) => ({ sym: k, from: sn.prev[k], to: v }));
   const acts = [];
-  const sells = st.rows.filter(r => r.s?.stage >= 2 && r.s.signal === 'SELL').sort((a, b) => b.w - a.w);
+  const sells = st.rows.filter(r => r.action.startsWith('EXIT')).sort((a, b) => b.w - a.w);
   if (sells.length) acts.push(['bad', `${sells.length} holdings rated EXIT (${(sells.reduce((a, r) => a + r.w, 0) * 100).toFixed(1)}% of value)`, sells.slice(0, 8).map(r => r.symbol)]);
-  const weak = st.rows.filter(r => r.s?.expected_return != null && r.s.expected_return < 12 && r.s.signal !== 'SELL').sort((a, b) => b.w - a.w);
+  const cons = st.rows.filter(r => r.action === 'CONSIDER EXIT').sort((a, b) => b.w - a.w);
+  if (cons.length) acts.push(['bad', `${cons.length} holdings with a weak hold checklist (consider exit)`, cons.slice(0, 8).map(r => r.symbol)]);
+  const trims = st.rows.filter(r => r.action === 'BOOK PART PROFIT').sort((a, b) => b.w - a.w);
+  if (trims.length) acts.push(['warn', `${trims.length} holdings stretched or expensive: consider booking part profit`, trims.slice(0, 8).map(r => r.symbol)]);
+  const weak = st.rows.filter(r => r.s?.expected_return != null && r.s.expected_return < 12 && !r.action.startsWith('EXIT') && r.action !== 'CONSIDER EXIT').sort((a, b) => b.w - a.w);
   if (weak.length) acts.push(['warn', `${weak.length} holdings expected to return under 12%/yr, below your 15% long-term target`, weak.slice(0, 8).map(r => r.symbol)]);
   const big = st.rows.filter(r => r.w > 0.10);
   if (big.length) acts.push(['warn', 'Single stocks above 10% of the portfolio', big.map(r => `${r.symbol} ${(r.w * 100).toFixed(0)}%`)]);
@@ -334,18 +405,12 @@ function reportHtml(p, compact = false) {
       <div class="tile"><div class="l">Health score</div><div class="v" style="color:${scoreColor(st.score)}">${st.score == null ? '—' : st.score.toFixed(0)}<span class="muted" style="font-size:13px"> /100</span></div></div>
       <div class="tile"><div class="l">Expected return/yr</div><div class="v ${gap >= 0 ? 'pos' : 'neg'}">${pc(st.er)}</div><div class="hint">${gap == null ? '' : gap >= 0 ? 'On track for ' + target() + '%' : Math.abs(gap).toFixed(1) + ' pts short of ' + target() + '%'}</div></div>
     </div>
-    ${R.changes.length ? `<div class="changes"><b>Signal changes since ${esc(R.prevDate || 'last update')}:</b> ${R.changes.map(c => `<a href="#stock/${encodeURIComponent(c.sym)}">${esc(c.sym)}</a> ${esc(c.from)} → ${pill(c.to)}`).join(' · ')}</div>` : ''}
+    ${R.changes.length ? `<div class="changes"><b>Call changes since ${esc(R.prevDate || 'last update')}:</b> ${R.changes.map(c => `<a href="#stock/${encodeURIComponent(c.sym)}">${esc(c.sym)}</a> ${esc(c.from)} → ${pill(c.to)}`).join(' · ')}</div>` : ''}
     <ul class="acts">${R.acts.slice(0, compact ? 4 : 20).map(([lvl, msg, syms, act]) => `<li class="${lvl}"><span class="dot"></span><div>${esc(msg)}${syms.length ? '<div class="syms">' + syms.map(s => { const sym = String(s).split(' ')[0]; return `<a href="#stock/${encodeURIComponent(sym)}">${esc(s)}</a>`; }).join('') + '</div>' : ''}${act === 'sync' ? '<button class="btn ghost small" data-sync style="margin-top:6px">Save to cloud &amp; fetch</button>' : ''}</div></li>`).join('') || '<li class="ok"><span class="dot"></span><div>No issues flagged today.</div></li>'}</ul>`;
 }
 function wireSync(root) { root.querySelectorAll('[data-sync]').forEach(b => b.addEventListener('click', async () => { b.disabled = true; if (await cloudSave()) dispatch('portfolio'); b.disabled = false; })); }
 async function cloudSaveIfDirty() { if (cloudReady() && LS.get('pfUpdated', 0) > LS.get('cloudSaved', 0)) return cloudSave(true); return true; }
-function actionFor(row, weight) {
-  if (!row || (row.stage || 0) < 2 || !row.signal || row.signal === 'SCAN') return 'NOT ANALYSED';
-  if (row.signal === 'SELL') return 'EXIT';
-  if (row.signal === 'BUY') return weight >= 0.08 ? 'HOLD (already large)' : row.horizon?.term === 'Short term' ? 'SHORT-TERM TRADE' : 'BUY MORE';
-  if (row.expected_return != null && row.expected_return < 12) return 'HOLD / REVIEW';
-  return 'HOLD';
-}
+const actionFor = (row, weight) => holdCall(row, weight);
 // ---- why a portfolio call: the portfolio-specific reasons + the stock's own for/against
 function actionReasons(r) {
   const s = r.s || {}, out = [], er = s.expected_return, w = r.w * 100, g = r.gainp;
@@ -353,13 +418,21 @@ function actionReasons(r) {
   if (!s.signal || (s.stage || 0) < 2) return ['Not analysed yet: it trades too little or has no data. Use "Refresh analysis" on its page.'];
   out.push(`Overall score ${Math.round(s.overall)}/100 (fundamentals ${s.fundamental != null ? Math.round(s.fundamental) : '—'}, technicals ${s.technical != null ? Math.round(s.technical) : '—'}${s.news != null ? ', news ' + Math.round(s.news) : ''}); confidence ${s.confidence || '—'}.`);
   if (er != null) out.push(`Expected return about ${er.toFixed(0)}%/yr vs your ${target()}%/yr target${er >= target() ? ': meets it' : er >= st ? ': below target, only fits a short-term view' : ': well below target'}.`);
-  if (r.action === 'EXIT') out.push('The model rates it SELL: weak enough that the money is likely to do better elsewhere.');
-  if (r.action === 'HOLD (already large)') out.push(`Rated BUY, but it is already ${w.toFixed(1)}% of this portfolio (8% is the cap per stock), so hold rather than add.`);
-  else if (r.action === 'BUY MORE') out.push(`Rated BUY and only ${w.toFixed(1)}% of the portfolio, so there is room to add (check the entry timing on its page first).`);
-  else if (r.action === 'HOLD / REVIEW') out.push('Not a sell, but its expected return is below 12%/yr; review it at the next quarterly result.');
-  else if (r.action === 'HOLD') out.push('Not strong enough to add to, not weak enough to sell.');
-  else if (r.action === 'SHORT-TERM TRADE') out.push('Rated BUY for a short-term move only; set the stop-loss shown on its page.');
-  if (g != null) out.push(`You are ${g >= 0 ? 'up' : 'down'} ${Math.abs(g).toFixed(0)}% on this holding${g < -25 && r.action === 'EXIT' ? '. The loss is already taken; the question is only where the money grows best from here' : ''}.`);
+  const h = rowHold(s), model = { BUY: 'BUY', HOLD: 'HOLD', SELL: 'SELL' }[s.signal] || s.signal;
+  out.push(`Model rating for the business and price today: ${model}. Your call below also uses the hold / exit checklist and your weight in this portfolio, so it can differ from the rating.`);
+  if (h) out.push(`Hold score ${h.score}/100 from the same factors as entry, read for a holder${h.broken ? '; the trend is broken (exit warning)' : ''}${h.trims.length ? '; stretched or expensive on ' + h.trims.length + ' factor' + (h.trims.length > 1 ? 's' : '') : ''}.`);
+  const A = r.action;
+  if (A === 'EXIT') out.push(h && h.score < 55 ? 'Rated SELL and the hold checklist agrees: the money is likely to do better elsewhere.' : 'Rated SELL: weak enough that the money is likely to do better elsewhere.');
+  else if (A === 'EXIT (no rush)') out.push('Rated SELL on the business, but the price trend is still healthy, so sell in parts or on the first sign of the trend breaking.');
+  else if (A === 'CONSIDER EXIT') out.push(`Not rated SELL, but the hold checklist is weak (${h.score}/100): ${h.broken ? 'the trend has broken and ' : ''}most factors point down. Decide whether your original reason to own it still holds.`);
+  else if (A === 'BOOK PART PROFIT') out.push(`Still a ${model === 'SELL' ? 'weak' : 'reasonable'} business, but stretched or expensive (${h.trims.join(', ')}): selling a part locks in gains and lowers risk.`);
+  else if (A === 'HOLD (already large)') out.push(`Rated BUY, but it is already ${w.toFixed(1)}% of this portfolio (8% is the cap per stock), so hold rather than add.`);
+  else if (A === 'ADD MORE') out.push(`Rated BUY, only ${w.toFixed(1)}% of the portfolio and the entry checklist is OK now, so there is room to add.`);
+  else if (A === 'HOLD (add on dip)') out.push(`Rated BUY and there is room to add (${w.toFixed(1)}% of the portfolio), but the entry checklist says wait for a better price.`);
+  else if (A === 'HOLD / REVIEW') out.push('Not a sell, but its expected return is below 12%/yr; review it at the next quarterly result.');
+  else if (A === 'HOLD') out.push('Not strong enough to add to, not weak enough to sell.');
+  else if (A === 'SHORT-TERM TRADE') out.push('Rated BUY for a short-term move only; set the stop-loss shown on its page.');
+  if (g != null) out.push(`You are ${g >= 0 ? 'up' : 'down'} ${Math.abs(g).toFixed(0)}% on this holding${g < -25 && r.action.startsWith('EXIT') ? '. The loss is already taken; the question is only where the money grows best from here' : ''}.`);
   if (s.horizon?.note) out.push(s.horizon.note);
   return out;
 }
@@ -381,6 +454,8 @@ async function toggleWhy(btn, r, all = []) {
   tr.after(row); btn.setAttribute('aria-expanded', 'true');
   const d = r.s && (r.s.stage || 0) >= 2 ? await loadDetail(r.symbol).catch(() => null) : null;
   const box = row.querySelector('.whypts');
+  const hd = holdFromDetail(d?.entry);
+  if (hd) box.previousElementSibling.insertAdjacentHTML('beforebegin', `<div class="ph">Hold / exit checklist (same factors as entry)</div>${holdHtml(hd)}${holdChecklistHtml(hd)}`);
   if (d?.points) { box.classList.remove('muted'); box.innerHTML = pointsHtml({ ...d.points, verdict: d.points.verdict }); }
   else if (d && (d.strengths || d.weaknesses)) { box.classList.remove('muted'); box.innerHTML = pointsHtml({ for: d.strengths || [], against: d.weaknesses || [] }); }
   else box.textContent = 'No detailed reasons available for this stock yet.';
@@ -606,13 +681,14 @@ async function viewStock(sym) {
       <p class="sub">${esc(d.sector || '')}${d.industry ? ' · ' + esc(d.industry) : ''} · ₹${n(d.price)} · ${stageLabel(d.stage)} · analysed ${esc(d.analysed || '')}</p></div>
     <div class="card verdict">
       <div class="big" style="color:${scoreColor(d.overall)}">${d.overall ?? '—'}</div>
-      <div><div class="sig">${pill(sigLabel(d.symbol, d.signal))}</div>${d.signal === 'BUY' || h ? hzLine(d.horizon) : ''}${entryHtml(entryFromDetail(d.entry))}<div class="hint" style="margin-top:6px">Confidence <b>${esc(d.confidence)}</b> · data coverage ${Math.round((d.coverage || 0) * 100)}%</div></div>
+      <div><div class="sig">${h ? `<span class="hint">Model rating</span> ${pill(d.signal)}` : pill(sigLabel(d.symbol, d.signal))}</div>${d.signal === 'BUY' || h ? hzLine(d.horizon) : ''}${entryHtml(entryFromDetail(d.entry))}<div class="hint" style="margin-top:6px">Confidence <b>${esc(d.confidence)}</b> · data coverage ${Math.round((d.coverage || 0) * 100)}%</div></div>
       <div style="flex:1 1 260px;min-width:0"><div class="hint">Expected return vs your ${target()}% target</div>
         <div class="mono ${d.expected_return >= target() ? 'pos' : 'neg'}" style="font-size:22px">${pc(d.expected_return)} / yr</div>
         <div class="hint">Strong: ${esc((d.strengths || []).join(', '))}<br>Weak: ${esc((d.weaknesses || []).join(', '))}</div></div>
       <button class="btn ghost" id="analyse">Refresh analysis</button>
     </div>
-    ${h ? `<div class="banner" style="margin:0">You hold ${n(h.qty, f0)} shares at ₹${n(h.avg)} · P&L ${pc(d.price && h.avg ? (d.price / h.avg - 1) * 100 : null)} · Action: ${pill(actionFor(BY.get(d.symbol) || d, 0))}</div>` : ''}
+    ${h ? `<div class="banner" style="margin:0">You hold ${n(h.qty, f0)} shares at ₹${n(h.avg)} · P&L ${pc(d.price && h.avg ? (d.price / h.avg - 1) * 100 : null)} · Your call: ${pill(holdCall(BY.get(d.symbol) || d, heldWeights().get(d.symbol) || 0))} <a href="#portfolios">why →</a></div>` : ''}
+    ${h && holdFromDetail(d.entry) ? `<div class="card"><div class="cardhead"><h2>Hold / exit checklist: should you keep holding?</h2><a href="#picks">Choose factors →</a></div>${holdHtml(holdFromDetail(d.entry))}${holdChecklistHtml(holdFromDetail(d.entry), true)}</div>` : ''}
     ${d.entry?.checks ? `<div class="card"><div class="cardhead"><h2>Entry checklist: is now a good time to buy?</h2><a href="#picks">Choose factors →</a></div>${checklistHtml(entryFromDetail(d.entry), true)}</div>` : ''}
     <div class="card"><h2>${h ? 'Buy more, hold or exit' : 'Buy or not'}: the reasons</h2>${pointsHtml(d.points ? { ...d.points, verdict: h ? d.points.verdict : (d.points.verdict_new || d.points.verdict) } : null) || '<p class="muted">No reasons yet.</p>'}</div>
     <div class="grid2">
@@ -711,27 +787,27 @@ function viewPortfolios() {
       </div>
       <div id="unmatched"></div>
     </div>
+    ${entryFactorsHtml()}
     <div class="tbox"><table id="pt"><thead><tr>
-      ${[['symbol', 'Stock'], ['signal', 'Signal'], ['score', 'Score'], ['qty', 'Qty', 'num hide-sm'], ['avg', 'Avg ₹', 'num hide-sm'], ['px', 'Price ₹', 'num hide-sm'], ['val', 'Value', 'num'], ['w', 'Weight', 'num'], ['er', 'Exp. ret', 'num hide-sm'], ['gainp', 'Gain %', 'num'], ['action', 'Action'], ['', '']]
+      ${[['symbol', 'Stock'], ['action', 'Your call'], ['hold', 'Hold score'], ['score', 'Model score', 'hide-sm'], ['qty', 'Qty', 'num hide-sm'], ['avg', 'Avg ₹', 'num hide-sm'], ['px', 'Price ₹', 'num hide-sm'], ['val', 'Value', 'num'], ['w', 'Weight', 'num'], ['er', 'Exp. ret', 'num hide-sm'], ['gainp', 'Gain %', 'num'], ['', '']]
         .map(([k, l, c]) => `<th class="${k ? 'sort' : ''} ${c || ''}" data-k="${k}" aria-sort="${pfSort.key === k ? (pfSort.dir < 0 ? 'descending' : 'ascending') : 'none'}">${l}</th>`).join('')}
     </tr></thead><tbody></tbody></table></div>`;
-  const rows = st.rows.map(r => ({ ...r, signal: r.s?.stage >= 2 ? r.s.signal : '', score: r.s?.stage >= 2 ? r.s.overall : null, er: r.s?.expected_return ?? null, gainp: r.px ? (r.px / r.avg - 1) * 100 : null, action: actionFor(r.s, r.w) }))
+  const rows = st.rows.map(r => ({ ...r, signal: r.s?.stage >= 2 ? r.s.signal : '', score: r.s?.stage >= 2 ? r.s.overall : null, hold: rowHold(r.s)?.score ?? null, er: r.s?.expected_return ?? null, gainp: r.px ? (r.px / r.avg - 1) * 100 : null, action: actionFor(r.s, r.w) }))
     .sort((a, b) => { const x = a[pfSort.key], y = b[pfSort.key]; if (x == null || x === '') return 1; if (y == null || y === '') return -1; return (typeof x === 'string' ? x.localeCompare(y) : x - y) * pfSort.dir; });
   $('#pt tbody').innerHTML = rows.length ? rows.map(r => `<tr class="click" data-s="${esc(r.symbol)}">
     <td><b>${esc(r.symbol)}</b>${r.raw && r.raw !== r.symbol ? `<div class="muted" style="font-size:12px">${esc(r.raw)}</div>` : ''}</td>
-    <td>${r.signal ? pill(sigLabel(r.symbol, r.signal)) : '<span class="muted">not analysed</span>'}</td><td>${bar(r.score)}</td>
+    <td><button class="whybtn" data-why="${esc(r.symbol)}" aria-expanded="false" title="Why this call?">${pill(r.action)}<span class="whylink">Why? ▾</span></button>${r.s?.horizon ? `<div class="hint">${esc(hzText(r.s.horizon))}</div>` : ''}</td><td>${bar(r.hold)}</td><td class="hide-sm">${bar(r.score)}</td>
     <td class="num hide-sm">${n(r.qty, f0)}</td><td class="num hide-sm">${n(r.avg)}</td><td class="num hide-sm">${r.priced ? n(r.px) : '—'}</td>
     <td class="num">${inr(r.val)}</td><td class="num">${(r.w * 100).toFixed(1)}%</td><td class="num hide-sm">${pc(r.er)}</td>
     <td class="num ${r.gainp >= 0 ? 'pos' : 'neg'}">${pc(r.gainp)}</td>
-    <td><button class="whybtn" data-why="${esc(r.symbol)}" aria-expanded="false" title="Why this call?">${pill(r.action)}<span class="whylink">Why? ▾</span></button>${r.s?.horizon ? `<div class="hint">${esc(hzText(r.s.horizon))}</div>` : ''}</td>
     <td><button class="btn ghost small" data-del="${esc(r.symbol)}" aria-label="Remove ${esc(r.symbol)}">✕</button></td></tr>`).join('')
     : '<tr><td colspan="12" class="empty">No holdings yet. Add one above or upload your broker file.</td></tr>';
 
-  wireSync(v);
+  wireSync(v); wireEntryFactors(v, viewPortfolios);
   $('#csave').addEventListener('click', () => cloudSave());
   $('#cload').addEventListener('click', async () => { if (!cloudReady()) { toast('Set GitHub and a passphrase in Settings first.'); return; } if (await cloudLoad(true)) { toast('Loaded portfolios from cloud.'); viewPortfolios(); } });
   renderReports();
-  $('#pt thead').addEventListener('click', e => { const th = e.target.closest('th[data-k]'); if (!th?.dataset.k) return; const k = th.dataset.k; pfSort.dir = pfSort.key === k ? -pfSort.dir : (['symbol', 'signal'].includes(k) ? 1 : -1); pfSort.key = k; viewPortfolios(); });
+  $('#pt thead').addEventListener('click', e => { const th = e.target.closest('th[data-k]'); if (!th?.dataset.k) return; const k = th.dataset.k; pfSort.dir = pfSort.key === k ? -pfSort.dir : (['symbol', 'action'].includes(k) ? 1 : -1); pfSort.key = k; viewPortfolios(); });
   $('#pt tbody').addEventListener('click', e => {
     const del = e.target.closest('[data-del]');
     if (del) { e.stopPropagation(); p.holdings = p.holdings.filter(h => h.symbol !== del.dataset.del); savePf(); viewPortfolios(); return; }

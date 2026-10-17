@@ -215,3 +215,6 @@ body.locked>header,body.locked>main,body.locked>#banner,body.locked>footer{displ
 .echkt tr.off{opacity:.45}
 .echkt td.num{white-space:nowrap;text-align:right;font-family:var(--mono);font-size:12px}
 @media (max-width:560px){.echkt td.num:last-child{display:none}}
+.pill.CONSIDER{background:var(--sell-bg);color:var(--sell)}
+.pill.BOOK{background:var(--hold-bg);color:var(--hold)}
+.pill.ADD{background:var(--buy-bg);color:var(--buy)}

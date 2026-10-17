@@ -46,8 +46,11 @@ def _status(s):
     return "na" if s is None else "good" if s >= 65 else "ok" if s >= 45 else "bad"
 
 
-def _chk(key, score, value, why, gate=False):
-    return {"k": key, "s": None if score is None else round(score), "st": _status(score), "v": value, "why": why, "g": bool(gate)}
+def _chk(key, score, value, why, gate=False, num=None):
+    c = {"k": key, "s": None if score is None else round(score), "st": _status(score), "v": value, "why": why, "g": bool(gate)}
+    if num is not None:
+        c["n"] = round(float(num), 3)
+    return c
 
 
 def market_regime(bench_close, vix):
@@ -81,21 +84,21 @@ def build(sym, f, t, ctx=None):
                     gate=not trend_ok and d200 is not None))
     out.append(_chk("vs50", interp(ext50, [(-10, 35), (-4, 70), (0, 95), (5, 90), (10, 60), (15, 30), (25, 5)]), f"{ext50:+.1f}%",
                     "Close to its 50-day average: not stretched short term" if abs(ext50) <= 6 else
-                    f"{ext50:+.0f}% from its 50-day average: {'stretched' if ext50 > 0 else 'weak'} short term"))
+                    f"{ext50:+.0f}% from its 50-day average: {'stretched' if ext50 > 0 else 'weak'} short term", num=ext50))
     if ext200 is not None:
         s = interp(ext200, [(-15, 15), (-5, 40), (0, 70), (8, 95), (20, 80), (30, 45), (40, 20), (60, 5)])
         out.append(_chk("vs200", s, f"{ext200:+.1f}%",
                         f"{ext200:+.0f}% vs 200-day average: " + ("healthy uptrend" if 0 <= ext200 <= 25 else
                                                                    "over-stretched, big pull-backs are common" if ext200 > 25 else "below long-term trend"),
-                        gate=ext200 > 40))
+                        gate=ext200 > 40, num=ext200))
     if rsi is not None:
         out.append(_chk("rsi", interp(rsi, [(25, 40), (35, 75), (45, 95), (58, 85), (65, 55), (72, 25), (80, 5)]), f"{rsi:.0f}",
-                        "Momentum healthy, not overheated" if 40 <= rsi <= 62 else "Overbought: often cools off first" if rsi > 62 else "Oversold: still falling"))
+                        "Momentum healthy, not overheated" if 40 <= rsi <= 62 else "Overbought: often cools off first" if rsi > 62 else "Oversold: still falling", num=rsi))
     if hi is not None:
         near = hi > -5
         out.append(_chk("hi52", interp(hi, [(-45, 15), (-30, 45), (-18, 85), (-8, 95), (-5, 60), (0, 45)]),
                         f"{hi:.1f}%", "At its 52-week high" if hi > -0.5 else f"{abs(hi):.0f}% below its 52-week high" +
-                        (": too close to the peak" if near else ": has pulled back from the peak" if hi > -25 else ": far below the peak, check why"), gate=near))
+                        (": too close to the peak" if near else ": has pulled back from the peak" if hi > -25 else ": far below the peak, check why"), gate=near, num=hi))
     low20 = t.get("low20")
     stop = None
     if low20 and low20 < price:
@@ -108,7 +111,7 @@ def build(sym, f, t, ctx=None):
     if sq:
         out.append(_chk("squeeze", interp(sq, [(0.6, 90), (0.8, 75), (1.0, 55), (1.3, 35), (1.7, 15)]), f"{sq:.2f}× usual",
                         "Calmer than usual: moves after quiet spells tend to be cleaner" if sq < 0.9 else
-                        "Swinging more than usual: wilder entry" if sq > 1.15 else "Normal swings"))
+                        "Swinging more than usual: wilder entry" if sq > 1.15 else "Normal swings", num=sq))
     acc = t.get("acc_ratio")
     if acc:
         out.append(_chk("volume", interp(acc, [(0.6, 15), (0.85, 40), (1.0, 55), (1.25, 75), (1.6, 92)]), f"{acc:.2f} up/down volume",
@@ -145,7 +148,7 @@ def build(sym, f, t, ctx=None):
     peg = pe / g if pe and pe > 0 and g and g > 0 else None
     if peg is not None:
         out.append(_chk("peg", interp(peg, [(0.5, 100), (1, 85), (1.5, 65), (2, 40), (3, 15), (4, 5)]), f"{peg:.1f} (P/E {pe:.0f})",
-                        f"P/E is {peg:.1f}× its profit growth: " + ("cheap for its growth" if peg < 1 else "fair" if peg < 1.6 else "expensive for its growth")))
+                        f"P/E is {peg:.1f}× its profit growth: " + ("cheap for its growth" if peg < 1 else "fair" if peg < 1.6 else "expensive for its growth"), num=peg))
     elif f.get("loss_making"):
         out.append(_chk("peg", 10, "loss-making", "No profits, so no P/E to justify the price"))
     hist = [x for x in (f.get("pe_history") or []) if x and 0 < x < 300]
@@ -153,12 +156,12 @@ def build(sym, f, t, ctx=None):
         rel = pe / statistics.median(hist)
         out.append(_chk("pe_hist", interp(rel, [(0.6, 92), (0.85, 78), (1.0, 62), (1.3, 40), (1.8, 15)]),
                         f"{pe:.0f} vs usual {statistics.median(hist):.0f}",
-                        "Cheaper than its own usual P/E" if rel < 0.9 else "Dearer than its own usual P/E" if rel > 1.15 else "Near its usual P/E"))
+                        "Cheaper than its own usual P/E" if rel < 0.9 else "Dearer than its own usual P/E" if rel > 1.15 else "Near its usual P/E", num=rel))
     med = (ctx.get("sector_pe") or {}).get(f.get("sector"))
     if pe and pe > 0 and med:
         rel = pe / med
         out.append(_chk("pe_sector", interp(rel, [(0.6, 92), (0.85, 78), (1.0, 62), (1.3, 40), (1.8, 15)]), f"{pe:.0f} vs sector {med:.0f}",
-                        "Cheaper than sector peers" if rel < 0.9 else "Dearer than sector peers" if rel > 1.15 else "In line with sector peers"))
+                        "Cheaper than sector peers" if rel < 0.9 else "Dearer than sector peers" if rel > 1.15 else "In line with sector peers", num=rel))
     q = f.get("q_ni") or []
     if len(q) >= 5 and q[-5] and q[-5] > 0:
         yoy = (q[-1] / q[-5] - 1) * 100
@@ -189,7 +192,106 @@ def build(sym, f, t, ctx=None):
     if m:
         out.append(_chk("market", m["score"], f"Nifty {m['nifty_vs_200']:+.1f}% vs 200-day" + (f", VIX {m['vix']:.1f}" if m.get("vix") else ""),
                         {"up": "Market in an uptrend", "mixed": "Market trend mixed", "down": "Market in a downtrend: even good stocks tend to fall"}[m["trend"]]))
+    add_exit(out)
     return out
+
+
+# ---------------------------------------------------------------- exit side
+# The same 17 factors, read from a holder's point of view: "should I keep holding?" Each check gets a hold
+# score x (high = keep holding, low = exit pressure), its own reason xw, and a trim flag t (stretched or
+# expensive: book part profit rather than exit). Being near the 52-week high is good for a holder; the
+# results date and the entry stop-loss do not decide a hold, so they score nothing on this side.
+HOLD_CAP = {"trend": 40}   # a broken trend caps the hold score
+
+
+def add_exit(checks):
+    for c in checks:
+        k, x, why, trim = c["k"], c.get("n"), None, False
+        xs = c["s"]
+        if k == "trend":
+            up = c["st"] == "good"
+            xs, why = (85, "Uptrend intact: no price reason to sell") if up else \
+                      (20, "Trend broken: price below its 200-day average (or 50-day below 200-day), the classic exit warning")
+            c["xg"] = not up
+        elif k == "vs50" and x is not None:
+            xs = interp(x, [(-15, 10), (-8, 30), (-3, 55), (0, 75), (10, 85), (25, 70), (40, 55)])
+            why = f"{x:+.0f}% vs 50-day average: " + ("holding up" if x >= -3 else "short-term weakness" if x > -8 else "sharp short-term fall")
+        elif k == "vs200" and x is not None:
+            xs, trim = interp(x, [(-20, 5), (-10, 20), (-3, 40), (0, 60), (10, 85), (30, 80), (45, 55), (70, 35)]), x > 40
+            why = f"{x:+.0f}% vs 200-day average: " + ("below its long-term trend" if x < 0 else
+                                                       "far above its long-term average, consider booking part profit" if x > 40 else "healthy")
+        elif k == "rsi" and x is not None:
+            xs, trim = interp(x, [(20, 25), (30, 40), (40, 60), (55, 85), (68, 75), (78, 50), (88, 30)]), x > 75
+            why = "Overbought: a time to book part profit, not to add" if x > 75 else "Weak momentum" if x < 35 else "Momentum fine"
+        elif k == "hi52" and x is not None:
+            xs = interp(x, [(-50, 10), (-35, 25), (-20, 55), (-10, 75), (0, 90)])
+            why = "Near its 52-week high: strength, a reason to hold" if x > -10 else \
+                  f"{abs(x):.0f}% below its 52-week high" + (": a normal pull-back" if x > -25 else ": a deep fall, check the reason")
+        elif k == "risk":
+            xs, why = None, f"Used for buying only (stop-loss level {c['v']})"
+        elif k == "squeeze" and x is not None:
+            xs = interp(x, [(0.6, 75), (1.0, 65), (1.3, 45), (1.7, 25)])
+            why = "Swinging much more than usual: often comes before a trend change" if x > 1.3 else "Normal or calm swings"
+        elif k == "peg":
+            if x is None:
+                xs, why = 20, "Loss-making: the price rests on hope of future profits"
+            else:
+                xs, trim = interp(x, [(0.5, 95), (1, 85), (2, 65), (3, 40), (4, 20), (6, 5)]), x > 3
+                why = f"PEG {x:.1f}: " + ("still reasonable for its growth" if x <= 2 else "rich, growth must stay high" if x <= 3 else "very expensive for its growth, consider booking part profit")
+        elif k in ("pe_hist", "pe_sector") and x is not None:
+            xs = interp(x, [(0.6, 90), (1, 75), (1.5, 50), (2, 25), (3, 10)])
+            trim = k == "pe_hist" and x > 1.8
+            what = "its own usual P/E" if k == "pe_hist" else "sector peers"
+            why = f"P/E {x:.1f}× {what}: " + ("not stretched" if x <= 1.3 else "getting stretched" if x <= 1.8 else "far above normal, re-rating risk")
+        elif k == "results":
+            xs, why = None, "Results date does not decide a hold or sell (expect a big move either way)"
+        c["x"] = None if xs is None else round(xs)
+        c["xst"] = _status(xs)
+        c["xw"] = why or c["why"]
+        if trim:
+            c["t"] = True
+
+
+def hold_score(checks, enabled=None):
+    en = set(enabled) if enabled is not None else set(ORDER)
+    num = den = 0.0
+    capped = []
+    for c in checks:
+        if c["k"] not in en:
+            continue
+        w = CHECKS[c["k"]][2]
+        if c.get("x") is not None:
+            num += c["x"] * w
+            den += w
+        if c.get("xg") and c["k"] in HOLD_CAP:
+            capped.append(c["k"])
+    if not den:
+        return None, []
+    s = num / den
+    for k in capped:
+        s = min(s, HOLD_CAP[k])
+    return round(s), capped
+
+
+def summarize_hold(checks):
+    s, capped = hold_score(checks)
+    if s is None:
+        return None
+    trims = [c["k"] for c in checks if c.get("t")]
+    bad = sorted((c for c in checks if c.get("xst") == "bad"), key=lambda c: c["x"])
+    good = sorted((c for c in checks if c.get("xst") == "good"), key=lambda c: -c["x"])
+    verdict = (("Exit warning: trend broken and several factors weak" if capped else "Exit warning: several factors weak") if s < 35 else
+               "Stretched or expensive: consider booking part profit" if len(trims) >= 2 and not capped else
+               ("Trend broken: watch closely" if capped else "Weakening: watch closely") if s < 50 else "Healthy: keep holding")
+    return {"score": s, "verdict": verdict, "capped_by": capped, "trim": trims,
+            "why": [c["xw"] for c in bad[:3]], "good": [c["xw"] for c in good[:3]],
+            "n_good": len(good), "n_bad": len(bad), "n_ok": sum(1 for c in checks if c.get("xst") == "ok")}
+
+
+def compact_hold(checks):
+    """For universe.json: hold scores in ORDER + trim bitmask."""
+    by = {c["k"]: c for c in checks}
+    return [by[k].get("x") if k in by else None for k in ORDER], sum(1 << i for i, k in enumerate(ORDER) if k in by and by[k].get("t"))
 
 
 def score(checks, enabled=None, weights=None):
@@ -244,7 +346,7 @@ def summarize(checks, t):
             "n_good": len(good), "n_bad": len(bad), "n_ok": sum(1 for c in checks if c["st"] == "ok"),
             "vs_50dma": round((t["price"] / t["dma50"] - 1) * 100, 1) if t.get("dma50") else None,
             "peg": next((float(c["v"].split()[0]) for c in checks if c["k"] == "peg" and c["s"] is not None and c["v"][0].isdigit()), None),
-            "pe": None, "checks": checks}
+            "pe": None, "hold": summarize_hold(checks), "checks": checks}
 
 
 def compact(checks):
