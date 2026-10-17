@@ -31,6 +31,8 @@
     "min_price": 20,
     "max_fundamentals": 2500,
     "news_candidates": 30,
+    "news_per_cap": 25,
+    "news_per_cap_quick": 12,
     "top_picks": 5,
     "max_picks_per_sector": 2,
     "workers": 4,

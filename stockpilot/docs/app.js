@@ -381,6 +381,10 @@ function dailyReport(p) {
   if (trims.length) acts.push(['warn', `${trims.length} holdings stretched or expensive: consider booking part profit`, trims.slice(0, 8).map(r => r.symbol)]);
   const weak = st.rows.filter(r => r.s?.expected_return != null && r.s.expected_return < 12 && !r.action.startsWith('EXIT') && r.action !== 'CONSIDER EXIT').sort((a, b) => b.w - a.w);
   if (weak.length) acts.push(['warn', `${weak.length} holdings expected to return under 12%/yr, below your 15% long-term target`, weak.slice(0, 8).map(r => r.symbol)]);
+  const flagged = st.rows.filter(r => r.s?.nw?.flags > 0);
+  if (flagged.length) acts.push(['bad', `${flagged.length} holdings with a red flag in recent news or filings`, flagged.map(r => r.symbol)]);
+  const badNews = st.rows.filter(r => !(r.s?.nw?.flags > 0) && r.s?.nw?.n7 >= 2 && r.s.nw.tone7 <= -0.5).sort((a, b) => b.w - a.w);
+  if (badNews.length) acts.push(['warn', `${badNews.length} holdings with negative news this week`, badNews.slice(0, 8).map(r => r.symbol)]);
   const big = st.rows.filter(r => r.w > 0.10);
   if (big.length) acts.push(['warn', 'Single stocks above 10% of the portfolio', big.map(r => `${r.symbol} ${(r.w * 100).toFixed(0)}%`)]);
   const tiny = st.rows.filter(r => r.w < 0.01);
@@ -388,7 +392,7 @@ function dailyReport(p) {
   const sec = {}; st.rows.forEach(r => { const k = r.s?.sector || 'Unknown'; sec[k] = (sec[k] || 0) + r.w; });
   Object.entries(sec).filter(([k, w]) => w > 0.25 && k !== 'Unknown').forEach(([k, w]) => acts.push(['warn', `${k} is ${(w * 100).toFixed(0)}% of the portfolio`, []]));
   const notDeep = st.rows.filter(r => !r.s || r.s.stage < 3);
-  if (notDeep.length) acts.push(['info', `${notDeep.length} holdings lack a full daily analysis. Save portfolios to the cloud so they're analysed every day.`, notDeep.slice(0, 10).map(r => r.symbol), 'sync']);
+  if (notDeep.length) acts.push(['info', `${notDeep.length} holdings had no news check in the latest run. Save portfolios to the cloud so their news is checked every run.`, notDeep.slice(0, 10).map(r => r.symbol), 'sync']);
   const held = new Set(st.rows.map(r => r.symbol));
   const ideas = PICKS.filter(x => !held.has(x.symbol));
   if (sells.length && ideas.length) acts.push(['ok', "Replacement ideas from today's top picks", ideas.map(x => x.symbol)]);
@@ -434,6 +438,10 @@ function actionReasons(r) {
   else if (A === 'SHORT-TERM TRADE') out.push('Rated BUY for a short-term move only; set the stop-loss shown on its page.');
   if (g != null) out.push(`You are ${g >= 0 ? 'up' : 'down'} ${Math.abs(g).toFixed(0)}% on this holding${g < -25 && r.action.startsWith('EXIT') ? '. The loss is already taken; the question is only where the money grows best from here' : ''}.`);
   if (s.horizon?.note) out.push(s.horizon.note);
+  const nb = s.nw;
+  if (nb?.flags) out.push(`Red flag in recent news or filings (${nb.flags}): read it below before deciding.`);
+  else if (nb && nb.n7) out.push(`News this week: ${nb.n7} item${nb.n7 > 1 ? 's' : ''}, tone ${nb.tone7 > 0.2 ? 'positive' : nb.tone7 < -0.2 ? 'negative' : 'mixed/neutral'}.`);
+  else if (nb) out.push(`No news this week${nb.last ? ' (latest ' + newsAge(nb.last) + ')' : ''}.`);
   return out;
 }
 function portfolioRisks(r, all) {
@@ -455,6 +463,7 @@ async function toggleWhy(btn, r, all = []) {
   const d = r.s && (r.s.stage || 0) >= 2 ? await loadDetail(r.symbol).catch(() => null) : null;
   const box = row.querySelector('.whypts');
   const hd = holdFromDetail(d?.entry);
+  box.previousElementSibling.insertAdjacentHTML('beforebegin', newsHtml(d, 4));
   if (hd) box.previousElementSibling.insertAdjacentHTML('beforebegin', `<div class="ph">Hold / exit checklist (same factors as entry)</div>${holdHtml(hd)}${holdChecklistHtml(hd)}`);
   if (d?.points) { box.classList.remove('muted'); box.innerHTML = pointsHtml({ ...d.points, verdict: d.points.verdict }); }
   else if (d && (d.strengths || d.weaknesses)) { box.classList.remove('muted'); box.innerHTML = pointsHtml({ for: d.strengths || [], against: d.weaknesses || [] }); }
@@ -476,6 +485,22 @@ function wireClaude(root, getPrompt) {
 // ================================================================ view: top picks (home)
 const CAPS = [['', 'All'], ['Large', 'Large cap'], ['Mid', 'Mid cap'], ['Small', 'Small cap'], ['Micro', 'Micro cap']];
 const capText = r => r?.cap ? `${r.cap} cap${r.mcap_cr ? ' · ₹' + f0.format(r.mcap_cr) + ' Cr' : ''}` : '';
+// ---- news: every pick and holding must have had its latest news checked; red flags or a bad news week hold a pick back
+const newsBlock = r => {
+  const nb = r.nw;
+  if (nb?.flags > 0) return 'Red flag in recent news or filings: read it first';
+  if ((r.stage || 0) < 3) return 'Latest news not checked yet';
+  if (nb?.tone7 != null && nb.n7 >= 2 && nb.tone7 <= -0.5) return 'Negative news this week';
+  return null;
+};
+const newsAge = d => { if (!d) return ''; const days = Math.round((Date.now() - new Date(d + 'T12:00:00')) / 864e5); return days <= 0 ? 'today' : days === 1 ? 'yesterday' : days + ' days ago'; };
+function newsHtml(d, max = 3) {
+  const hs = (d?.headlines || []).slice().sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, max);
+  const fl = (d?.filings || []).filter(x => x.red_flag).slice(0, 2);
+  if (!hs.length && !fl.length) return `<div class="news"><div class="ph">Latest news</div><div class="hint">${(d?.stage || 0) >= 3 ? 'No news in the last 30 days' + (d.news_checked ? ' (checked ' + esc(d.news_checked) + ')' : '') : 'Not checked yet for this stock'}</div></div>`;
+  const dot = t => `<span class="tone" style="background:${t > 0 ? 'var(--buy)' : t < 0 ? 'var(--sell)' : 'var(--nodata)'}"></span>`;
+  return `<div class="news"><div class="ph">Latest news${d.news_checked ? ` <span class="hint">· checked ${esc(d.news_checked)}</span>` : ''}</div><ul>${fl.map(x => `<li><span class="pill SELL">FLAG</span> <span class="d">${esc(x.date || '')}</span> ${x.link ? `<a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a>` : esc(x.title)}</li>`).join('')}${hs.map(x => `<li>${dot(x.tone)}<span class="d">${esc(newsAge(x.date))}</span> <a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a></li>`).join('')}</ul></div>`;
+}
 // Picks are chosen here in the browser from every analysed stock, so the target and the cap filter apply instantly.
 function computePicks() {
   const tgt = target(), cap = pickPrefs.cap, minT = META.scan?.min_traded_cr ?? 2, minE = META.scan?.min_entry_score ?? 55, perSec = META.scan?.max_picks_per_sector ?? 2;
@@ -486,10 +511,12 @@ function computePicks() {
     && (r.traded_cr || 0) >= minT && (!cap || r.cap === cap));
   pool.forEach(r => { r._e = rowEntry(r); });
   const rank = r => 0.55 * r.overall + 0.45 * r._e;
-  const ready = pool.filter(r => r._e != null && r._e >= minE).sort((x, y) => rank(y) - rank(x));
+  const newsLive = ROWS.some(r => r.nw);  // older data has no news summary: don't block on it
+  pool.forEach(r => { r._nb = newsLive ? newsBlock(r) : null; });
+  const ready = pool.filter(r => r._e != null && r._e >= minE && !r._nb).sort((x, y) => rank(y) - rank(x));
   const picks = [], secs = {};
   for (const r of ready) { const k = r.sector || 'Other'; if ((secs[k] || 0) >= perSec) continue; picks.push(r); secs[k] = (secs[k] || 0) + 1; if (picks.length === 5) break; }
-  const wait = pool.filter(r => r._e != null && r._e < minE).sort((x, y) => y.overall - x.overall).slice(0, 8);
+  const wait = pool.filter(r => r._e != null && (r._e < minE || (r._nb && r._nb !== 'Latest news not checked yet'))).sort((x, y) => rank(y) - rank(x)).slice(0, 8);
   return { live, picks, wait, pool: pool.length };
 }
 function pickCard(x, d, i) {
@@ -503,7 +530,7 @@ function pickCard(x, d, i) {
       <dt>P/E · PEG</dt><dd>${n(ent?.pe, f0)} · ${ent?.peg != null ? ent.peg.toFixed(1) : '—'}</dd>
       <dt>12 months</dt><dd>${pc(x.ret_12m)}</dd><dt>vs 50-day avg</dt><dd>${pc(ent?.vs_50dma)}</dd><dt>vs 200-day avg</dt><dd>${pc(t.vs_200dma ?? x.vs_200dma)}</dd><dt>RSI</dt><dd>${n(t.rsi ?? x.rsi, f0)}</dd></dl>
     ${pts ? pointsHtml({ verdict: pts.verdict, for: (pts.for || []).slice(0, 4), against: pts.against || [] }) : '<p class="hint">Loading reasons…</p>'}
-    ${(x.stage || d?.stage) < 3 ? '<p class="hint">News and filings not checked yet for this stock (only the top candidates are, each morning).</p>' : ''}
+    ${d ? newsHtml(d) : ''}
     ${claudeBox(x.symbol)}`;
 }
 async function saveTargetDefault(t) {
@@ -539,9 +566,9 @@ function viewPicks() {
     ${picks.length ? `<div class="picks">${picks.map((x, i) => `<div class="pick" id="pk${i}">${pickCard(x, null, i)}</div>`).join('')}</div>
       <p class="hint">Picks need: expected return of at least ${target()}%/yr, a buy-quality score, an entry-timing score of at least ${META.scan?.min_entry_score ?? 55} (price not stretched vs its averages, RSI not overheated, P/E reasonable for its growth, trend up), Medium or High confidence, at least ₹${META.scan?.min_traded_cr ?? 2} Cr traded daily, and at most ${META.scan?.max_picks_per_sector ?? 2} per sector. ${picks.length < 5 ? `Only ${picks.length} stocks cleared the bar; the system doesn't pad the list.` : ''}</p>`
       : `<div class="card empty">${ROWS.length ? `No stock cleared the bar${pickPrefs.cap ? ' in ' + esc(pickPrefs.cap) + ' cap' : ''} at ${target()}%/yr. Try a lower target or another size; the system won't force picks.` : 'Run the first full scan to see picks.'}</div>`}
-    ${wait.length ? `<div class="card"><div class="cardhead"><h2>Good businesses, wrong price today</h2><span class="hint">Meet your target, but stretched right now. Buy near the zone, not at today's price.</span></div>
+    ${wait.length ? `<div class="card"><div class="cardhead"><h2>Good businesses, not today</h2><span class="hint">Meet your target, but the price is stretched or the latest news says wait. Buy near the zone, not at today's price.</span></div>
       <div class="tbox"><table><thead><tr><th>Stock</th><th class="num">Score</th><th class="num">Entry</th><th class="num">Price</th><th class="num">Buy zone</th><th class="hide-sm">Why wait</th></tr></thead><tbody id="waitb">
-      ${wait.map(x => { const e = typeof x.entry === 'object' ? x.entry : null; return `<tr class="click" data-s="${esc(x.symbol)}"><td><b>${esc(x.symbol)}</b><div class="muted" style="font-size:12px">${esc((x.name || '').slice(0, 28))}${x.cap ? ' · ' + esc(x.cap) : ''}</div></td><td class="num">${Math.round(x.overall)}</td><td class="num">${x._e ?? (e ? e.score : x.entry) ?? '—'}</td><td class="num">${n(x.price, f0)}</td><td class="num" data-zone>${e?.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '…'}</td><td class="hide-sm" data-why style="white-space:normal;min-width:200px">${esc((e?.why || []).join('; '))}</td></tr>`; }).join('')}</tbody></table></div></div>` : ''}
+      ${wait.map(x => { const e = typeof x.entry === 'object' ? x.entry : null; return `<tr class="click" data-s="${esc(x.symbol)}"><td><b>${esc(x.symbol)}</b><div class="muted" style="font-size:12px">${esc((x.name || '').slice(0, 28))}${x.cap ? ' · ' + esc(x.cap) : ''}</div></td><td class="num">${Math.round(x.overall)}</td><td class="num">${x._e ?? (e ? e.score : x.entry) ?? '—'}</td><td class="num">${n(x.price, f0)}</td><td class="num" data-zone>${e?.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '…'}</td><td class="hide-sm" data-why data-nb="${esc(x._nb || '')}" style="white-space:normal;min-width:200px">${esc([x._nb, ...(e?.why || [])].filter(Boolean).join('; '))}</td></tr>`; }).join('')}</tbody></table></div></div>` : ''}
     ${IPOS.filter(x => x.call === 'APPLY').length ? `<div class="card"><div class="cardhead"><h2>IPOs worth applying for</h2><a href="#ipos">All IPOs →</a></div><div class="syms">${IPOS.filter(x => x.call === 'APPLY').map(x => `<a href="#ipos">${esc(x.name)} · ${x.score}</a>`).join('')}</div></div>` : ''}
     <div class="card"><div class="cardhead"><h2>Your portfolio today: ${esc(pf?.name || '')}</h2><a href="#portfolios">Open portfolio →</a></div>${pf ? reportHtml(pf, true) : ''}</div>`;
   wireSync(v);
@@ -554,7 +581,7 @@ function viewPicks() {
   wireEntryFactors(v, viewPicks);
   if (!live) return;
   picks.forEach(async (x, i) => { const d = await loadDetail(x.symbol).catch(() => null); const el = document.getElementById('pk' + i); if (el && d) { el.innerHTML = pickCard(x, d, i); wireClaude(el, async sym => stockPrompt(await loadDetail(sym) || BY.get(sym))); } });
-  v.querySelectorAll('#waitb tr[data-s]').forEach(async tr => { const d = await loadDetail(tr.dataset.s).catch(() => null); const e = d?.entry; if (!e) return; tr.querySelector('[data-zone]').textContent = e.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '—'; tr.querySelector('[data-why]').textContent = (e.why || []).join('; '); });
+  v.querySelectorAll('#waitb tr[data-s]').forEach(async tr => { const d = await loadDetail(tr.dataset.s).catch(() => null); const e = d?.entry; if (!e) return; tr.querySelector('[data-zone]').textContent = e.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '—'; const w = tr.querySelector('[data-why]'); w.textContent = [w.dataset.nb, ...(e.score >= (META.scan?.min_entry_score ?? 55) ? [] : (e.why || []))].filter(Boolean).join('; '); });
 }
 
 // ================================================================ view: screener

@@ -37,7 +37,7 @@ SCAN = S["scan"]
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 FIELDS = ["symbol", "name", "sector", "price", "overall", "signal", "confidence", "expected_return",
           "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event", "horizon",
-          "mcap_cr", "cap", "entry", "pe", "ec", "eg", "xc", "xt", "hold"]
+          "mcap_cr", "cap", "entry", "pe", "ec", "eg", "xc", "xt", "hold", "nw"]
 
 
 def fname(sym):
@@ -156,6 +156,7 @@ def row_from(d, base):
     r["ec"], r["eg"] = entry_mod.compact(e.get("checks") or [])
     r["xc"], r["xt"] = entry_mod.compact_hold(e.get("checks") or [])
     r["hold"] = (e.get("hold") or {}).get("score")
+    r["nw"] = d.get("news_brief")
     return r
 
 
@@ -200,6 +201,46 @@ def rebuild_entries(details, rows, ctx):
                 rows[sym]["xc"], rows[sym]["xt"] = entry_mod.compact_hold(e["checks"])
                 rows[sym]["hold"] = (e.get("hold") or {}).get("score")
                 rows[sym]["pe"] = f.get("pe")
+
+
+def news_pool(rows, per_cap):
+    """Every stock that could become a top pick under any cap filter or a lower return target: the best
+    `per_cap` of each cap bucket by the pick ranking (business score + entry timing), with a loose filter."""
+    pool = [r for r in rows.values() if (r.get("stage") or 0) >= 2 and r.get("overall") is not None
+            and (r.get("signal") == "BUY" or (r.get("signal") == "HOLD" and r["overall"] >= 60))
+            and r.get("confidence") in ("High", "Medium") and (r.get("expected_return") or 0) >= 12
+            and (r.get("traded_cr") or 0) >= SCAN["min_traded_cr"]]
+    pool.sort(key=lambda r: -(0.55 * r["overall"] + 0.45 * (r.get("entry") or 0)))
+    out, n = [], {}
+    for r in pool:
+        c = r.get("cap") or "Micro"
+        if n.get(c, 0) < per_cap:
+            out.append(r["symbol"])
+            n[c] = n.get(c, 0) + 1
+    return out
+
+
+def add_news(sym, d, newsp, market, bse_code="", extra=()):
+    """Fetch latest headlines + filings for an already analysed stock and re-score it (no fundamentals refetch)."""
+    f, t = dict(d.get("fundamentals") or {}), dict(d.get("technicals") or {})
+    headlines, filings, errors = [], list(extra), []
+    try:
+        headlines = newsp.headlines(d.get("name") or sym)
+    except Exception as e:
+        errors.append(f"news: {e}")
+    if bse_code:
+        try:
+            seen = {x["title"] for x in filings}
+            filings += [x for x in newsp.bse_filings(bse_code) if x["title"] not in seen]
+        except Exception as e:
+            errors.append(f"filings: {e}")
+    tilt = global_mkts.sector_tilt(market, f.get("sector"))
+    why = ((market or {}).get("tilts") or {}).get(f.get("sector") or "", {}).get("why", [])
+    sc = scoring.score_stock(f, t, headlines, filings, {"score": tilt, "why": why} if tilt is not None else None, sym)
+    d.update(sc)
+    d.update({"headlines": headlines, "filings": filings[:12], "stage": 3, "errors": (d.get("errors") or []) + errors,
+              "news_checked": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M")})
+    return d
 
 
 def assign_caps(rows):
@@ -456,6 +497,26 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
         except Exception:
             traceback.print_exc()
             failed.append(sym)
+
+    # ---- latest news for every possible top pick (any cap filter) that stage 3 did not already cover
+    if mode in ("full", "quick") and not sample:
+        assign_caps(rows)
+        done = set(cand3)
+        extra = [s_ for s_ in news_pool(rows, SCAN.get("news_per_cap", 25) if mode == "full" else SCAN.get("news_per_cap_quick", 12))
+                 if s_ not in done and s_ in details]
+        print(f"stage 3b: latest news for {len(extra)} more pick candidates")
+
+        def do3(sym):
+            try:
+                return sym, add_news(sym, details[sym], newsp, market, code_of.get(sym, ""), ann_by_sym.get(sym, []))
+            except Exception:
+                traceback.print_exc()
+                return sym, None
+        with ThreadPoolExecutor(4) as ex:
+            for sym, d in ex.map(do3, extra):
+                if d:
+                    details[sym] = d
+                    rows[sym] = row_from(d, rows[sym])
 
     sd = OUT / "stocks"
     sd.mkdir(parents=True, exist_ok=True)

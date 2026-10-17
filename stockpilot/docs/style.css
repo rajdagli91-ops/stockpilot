@@ -218,3 +218,5 @@ body.locked>header,body.locked>main,body.locked>#banner,body.locked>footer{displ
 .pill.CONSIDER{background:var(--sell-bg);color:var(--sell)}
 .pill.BOOK{background:var(--hold-bg);color:var(--hold)}
 .pill.ADD{background:var(--buy-bg);color:var(--buy)}
+.news{margin:10px 0}.news ul{list-style:none;margin:4px 0 0;padding:0}.news li{display:flex;gap:8px;align-items:flex-start;font-size:13px;line-height:1.4;padding:3px 0}
+.news li .d{color:var(--muted);white-space:nowrap;font-size:12px;min-width:74px}.news li a{color:inherit}

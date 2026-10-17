@@ -4,6 +4,7 @@ Each parameter scores 0-100 (None = no data). The overall score is a weighted av
 the parameters that have data; `coverage` says how much of the model had data.
 Edit config/settings.json to change the hurdle, weights or thresholds.
 """
+import datetime as dt
 import json
 from pathlib import Path
 
@@ -135,8 +136,16 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
     if f.get("pe") and f["pe"] > 0:
         g = f.get("profit_cagr") or f.get("rev_cagr")
         peg = f["pe"] / max(g, 1) if g is not None else None
+    # recent news counts double: the last 7 days matter more than a month ago
+    today = dt.date.today()
+    def _age(n):
+        try:
+            return (today - dt.date.fromisoformat(n.get("date") or "")).days
+        except ValueError:
+            return 30
+    wts = [2.0 if _age(n) <= 7 else 1.0 for n in news]
     tone = [n["tone"] for n in news]
-    news_s = float(np.clip(np.mean(tone), -2, 2)) if tone else None
+    news_s = float(np.clip(np.average(tone, weights=wts), -2, 2)) if tone else None
     flags = sum(1 for x in filings if x.get("red_flag")) + sum(
         1 for n in news if any(k in n["title"].lower() for k in ("fraud", "default", "insolvency", "auditor resign")))
     trend = None
@@ -264,7 +273,8 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
         "horizon": horizon, "short_term": st, "entry": entry,
         "strengths": [v[0] for _, v in ranked[::-1][:2]],
         "weaknesses": [v[0] for _, v in ranked[:2]],
-        "points": action_points(params, signal, er, t, flags, (macro or {}).get("why") or [], horizon, f, entry),
+        "points": action_points(params, signal, er, t, flags, (macro or {}).get("why") or [], horizon, f, entry, news, filings),
+        "news_brief": news_brief(news, filings) if (news or filings) else None,
         "params": [{"key": k, "label": v[0], "group": v[1], "score": None if v[2] is None else round(v[2]),
                     "value": None if v[3] is None else round(float(v[3]), 2), "unit": v[4], "weight": w[k]}
                    for k, v in params.items()],
@@ -335,7 +345,45 @@ def risk_points(params, f, t, entry, have_cons):
     return out
 
 
-def action_points(params, signal, er, t, flags, macro_why, horizon=None, f=None, entry=None):
+def news_brief(news, filings):
+    """Compact news summary for lists: counts, red flags, tone of the last 7 days, newest date."""
+    today = dt.date.today()
+    def age(x):
+        try:
+            return (today - dt.date.fromisoformat(x.get("date") or "")).days
+        except ValueError:
+            return 99
+    flags = sum(1 for x in filings if x.get("red_flag")) + sum(
+        1 for n in news if any(k in n["title"].lower() for k in ("fraud", "default", "insolvency", "auditor resign")))
+    wk = [n["tone"] for n in news if age(n) <= 7]
+    dates = sorted((x.get("date") or "" for x in list(news) + list(filings)), reverse=True)
+    return {"n": len(news), "n7": len(wk), "tone7": round(float(np.mean(wk)), 2) if wk else None,
+            "pos": sum(1 for n in news if n["tone"] > 0), "neg": sum(1 for n in news if n["tone"] < 0),
+            "flags": flags, "last": dates[0] if dates else None, "checked": today.isoformat()}
+
+
+def news_points(news, filings, days=21):
+    """Latest dated headlines that carry a clear tone, plus any red-flag filing: (for, against)."""
+    today = dt.date.today()
+    def age(x):
+        try:
+            return (today - dt.date.fromisoformat(x.get("date") or "")).days
+        except ValueError:
+            return 99
+    pro, con = [], []
+    for x in filings:
+        if x.get("red_flag") and age(x) <= 90:
+            con.append(f"Red flag filing ({x.get('date', '')}): {x['title'][:110]}")
+    recent = sorted((n for n in news if age(n) <= days), key=lambda n: n.get("date") or "", reverse=True)
+    for n in recent:
+        if n["tone"] > 0 and len(pro) < 2:
+            pro.append(f"News ({n['date']}): {n['title'][:110]}")
+        elif n["tone"] < 0 and len(con) < 3:
+            con.append(f"News ({n['date']}): {n['title'][:110]}")
+    return pro, con
+
+
+def action_points(params, signal, er, t, flags, macro_why, horizon=None, f=None, entry=None, news=None, filings=None):
     have = [(k, v) for k, v in params.items() if v[2] is not None and v[3] is not None]
     good = sorted([(k, v) for k, v in have if v[2] >= 70 and k in GOOD], key=lambda kv: -kv[1][2] * SETTINGS["weights"].get(kv[0], 1))
     bad = sorted([(k, v) for k, v in have if v[2] <= 35 and k in BAD], key=lambda kv: kv[1][2] / max(SETTINGS["weights"].get(kv[0], 1), 1))
@@ -343,6 +391,9 @@ def action_points(params, signal, er, t, flags, macro_why, horizon=None, f=None,
     con = [BAD[k](v[3]) for k, v in bad[:4]]
     if macro_why:
         (pro if (params["global"][2] or 50) >= 50 else con).append("Global: " + "; ".join(macro_why[:2]))
+    npro, ncon = news_points(news or [], filings or [])
+    con = ncon[:2] + con  # bad news first: it is what you most need to know
+    pro += npro[:1]
     if not pro:  # every call shows both sides: name the strongest points even when none is outstanding
         best = sorted(((k, v) for k, v in have if k not in ("red_flags", "news", "global")), key=lambda kv: -kv[1][2])[:2]
         pro += [f"Best point: {v[0].lower()} scores {v[2]:.0f}/100" for _, v in best if v[2] >= 40]
