@@ -1,0 +1,7 @@
+total 492
+drwxr-xr-x  2 runner runner   4096 Oct 17 12:01 .
+drwxrwxrwt 15 root   root     4096 Oct 17 12:01 ..
+-rw-r--r--  1 runner runner    424 Oct 17 12:01 bse_all.json
+-rw-r--r--  1 runner runner    426 Oct 17 12:01 bse_board.json
+-rw-r--r--  1 runner runner 193898 Oct 17 12:01 screener_gujalkali.html
+-rw-r--r--  1 runner runner 289231 Oct 17 12:01 screener_mcx.html
