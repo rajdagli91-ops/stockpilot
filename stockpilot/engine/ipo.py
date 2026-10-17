@@ -396,6 +396,25 @@ def analyse(ipo, details, market, newsp=None):
             con.append("Loss-making in the latest year")
     if rev_g is not None and rev_g >= 20 and (pat_last is None or pat_last <= 0):
         pro.append(f"Revenue growing fast ({rev_g:.0f}%/yr), but not yet profitable")
+    # every IPO has risks: always list the main ones, even when the call is APPLY
+    risks = []
+    if pe and pe >= 40:
+        risks.append(f"High price: {pe:.0f}× earnings leaves little room if growth disappoints")
+    if ipo.get("ofs_pct") is not None and 20 < ipo["ofs_pct"] < 60:
+        risks.append(f"{ipo['ofs_pct']:.0f}% of the issue is existing holders selling")
+    if de is not None and 0.7 < de <= 1:
+        risks.append(f"Moderate debt: {de:.2f}× net worth")
+    if ipo.get("issue_size_cr") and ipo["issue_size_cr"] < 100:
+        risks.append(f"Small issue (₹{ipo['issue_size_cr']:.0f} Cr): low liquidity after listing")
+    if len([x for x in (ipo.get("revenue") or []) if x is not None]) < 3:
+        risks.append("Less than 3 years of financials available to judge the track record")
+    if (tilt is not None and tilt < 45):
+        risks.append("Global markets are a headwind for this sector right now")
+    risks.append("New listings often swing 20–40% in the first months; no price history to judge entry")
+    con += [r for r in risks if r not in con][:max(0, 4 - len(con))]
+    if not pro:
+        best = sorted((v for k, v in params.items() if v[2] is not None and k != "board"), key=lambda v: -v[2])[:2]
+        pro += [f"{v[0]}: {v[3] or ''} ({v[2]:.0f}/100)".replace(":  (", " (") for v in best if v[2] >= 40] or ["No clear strengths in the published figures"]
     if coverage < 0.5:
         verdict, call = "Not enough data yet: the IPO's financials weren't published or couldn't be read (you can add them in config/ipos.csv)", "NEED DATA"
     elif score >= 65:
