@@ -61,10 +61,10 @@ def load_state():
     return {}, {}
 
 
-def save_state(rows, meta, picks):
+def save_state(rows, meta, picks, wait=()):
     ordered = sorted(rows.values(), key=lambda r: (-(r.get("stage") or 0), -(r.get("overall") or -1)))
     jsave(OUT / "universe.json", {"meta": meta, "fields": FIELDS, "rows": [[r.get(k) for k in FIELDS] for r in ordered]})
-    jsave(OUT / "picks.json", {"meta": meta, "picks": picks}, compact=False)
+    jsave(OUT / "picks.json", {"meta": meta, "picks": picks, "wait": list(wait)}, compact=False)
 
 
 def load_details():
@@ -147,22 +147,32 @@ def row_from(d, base):
 
 
 def choose_picks(rows, details):
+    """Top picks = good business (BUY) AND a sensible entry price today. BUYs that are too stretched go to a wait list."""
+    min_entry = SCAN.get("min_entry_score", 55)
     pool = [r for r in rows.values() if r.get("stage") == 3 and r.get("signal") == "BUY"
             and r.get("confidence") in ("High", "Medium") and (r.get("traded_cr") or 0) >= SCAN["min_traded_cr"]]
-    pool.sort(key=lambda r: -(r["overall"] or 0))
+    entry = lambda r: ((details.get(r["symbol"]) or {}).get("entry") or {})
+    ready = [r for r in pool if (entry(r).get("score") or 0) >= min_entry]
+    ready.sort(key=lambda r: -(0.55 * (r["overall"] or 0) + 0.45 * entry(r)["score"]))
     picks, sectors = [], {}
-    for r in pool:
+    for r in ready:
         sec = r.get("sector") or "Other"
         if sectors.get(sec, 0) >= SCAN["max_picks_per_sector"]:
             continue
         d = details.get(r["symbol"]) or {}
         t = d.get("technicals") or {}
         picks.append({**r, "strengths": d.get("strengths"), "weaknesses": d.get("weaknesses"), "points": d.get("points"),
-                      "headlines": (d.get("headlines") or [])[:3], "vs_200dma": t.get("vs_200dma"), "rsi": t.get("rsi")})
+                      "headlines": (d.get("headlines") or [])[:3], "vs_200dma": t.get("vs_200dma"), "rsi": t.get("rsi"),
+                      "entry": d.get("entry")})
         sectors[sec] = sectors.get(sec, 0) + 1
         if len(picks) == SCAN["top_picks"]:
             break
-    return picks
+    chosen = {p["symbol"] for p in picks}
+    wait = sorted((r for r in pool if r["symbol"] not in chosen and entry(r) and entry(r).get("score", 100) < min_entry),
+                  key=lambda r: -(r["overall"] or 0))[:8]
+    wait = [{k: r.get(k) for k in ("symbol", "name", "sector", "price", "overall", "expected_return", "horizon")} |
+            {"entry": entry(r)} for r in wait]
+    return picks, wait
 
 
 # ---------------------------------------------------------------- BSE / NSE events
@@ -287,10 +297,11 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
         print(f"stage 1: prices for {len(names)} NSE stocks")
         s1 = stage1(names, bench, prov)
         rows = {sym: row for sym, (row, _, _) in s1.items()}
-        liquid = sorted((s for s, (r, _, _) in s1.items() if r["traded_cr"] >= SCAN["min_traded_cr"] and r["price"] >= SCAN["min_price"]),
+        min_an = SCAN.get("analyse_min_traded_cr", SCAN["min_traded_cr"])
+        liquid = sorted((s for s, (r, _, _) in s1.items() if r["traded_cr"] >= min_an and r["price"] >= SCAN["min_price"]),
                         key=lambda s: -s1[s][0]["traded_cr"])
         cand2 = list(dict.fromkeys(liquid[:SCAN["max_fundamentals"]] + [s for s in track if s in s1]))
-        print(f"stage 2: fundamentals for {len(cand2)} liquid stocks")
+        print(f"stage 2: fundamentals for {len(cand2)} stocks trading ≥ ₹{min_an} Cr/day (+ yours)")
 
         def do2(sym):
             row, h, t = s1[sym]
@@ -377,7 +388,7 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     if mode in ("full", "quick"):
         jsave(OUT / "events.json", {"updated": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST"), "events": events[:200]}, compact=False)
 
-    picks = choose_picks(rows, details)
+    picks, wait = choose_picks(rows, details)
     ipos = []
     if mode in ("full", "quick"):
         try:
@@ -399,7 +410,7 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     })
     if mode == "full":
         meta["last_full_scan"] = meta["updated"]
-    save_state(rows, meta, picks)
+    save_state(rows, meta, picks, wait)
 
     # ---- encrypted portfolio report + delivery
     key = os.environ.get("PORTFOLIO_KEY")
