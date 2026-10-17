@@ -8,7 +8,7 @@ const LS = {
   get(k, d) { try { const v = localStorage.getItem('sp.' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem('sp.' + k, JSON.stringify(v)); } catch { /* storage blocked */ } },
 };
-let META = {}, ROWS = [], BY = new Map(), PICKS = [], MARKET = {}, EVENTS = [], IPOS = [], IPO_UPDATED = '';
+let META = {}, ROWS = [], BY = new Map(), PICKS = [], WAIT = [], MARKET = {}, EVENTS = [], IPOS = [], IPO_UPDATED = '';
 const detailCache = new Map();
 let portfolios = LS.get('portfolios', [{ id: 'p1', name: 'My portfolio', holdings: [] }]);
 let activePf = LS.get('activePf', portfolios[0]?.id);
@@ -36,6 +36,7 @@ const heldSet = () => new Set(portfolios.flatMap(p => p.holdings.map(h => h.symb
 // Hold / Exit only make sense for stocks you own; anything else is Buy or Not a buy.
 const sigLabel = (sym, sig) => !sig || sig === 'SCAN' || sig === 'NO DATA' ? (sig || 'NO DATA') : sig === 'BUY' ? 'BUY' : heldSet().has(sym) ? (sig === 'SELL' ? 'EXIT' : 'HOLD') : 'NOT A BUY';
 const hzText = h => h ? `${h.term} · ${h.period}` : '';
+const entryHtml = e => !e ? '' : `<div class="entry ${e.score >= 65 ? 'good' : e.score >= 50 ? 'fair' : 'wait'}"><div><b>Entry timing ${e.score}/100</b> · ${esc(e.verdict)}</div>${(e.good || []).length ? `<div class="hint">✓ ${esc(e.good.join(' · '))}</div>` : ''}${(e.why || []).length ? `<div class="hint">✗ ${esc(e.why.join(' · '))}</div>` : ''}${e.score < 65 && e.zone ? `<div class="hint">Buy zone near the 50-day avg: ₹${n(e.zone[0], f0)}–${n(e.zone[1], f0)}</div>` : ''}</div>`;
 const hzLine = h => {
   if (!h) return '';
   const bits = [];
@@ -51,8 +52,8 @@ async function loadData(bust = false) {
   const q = bust ? '?t=' + Date.now() : '';
   try {
     const [u, p] = await Promise.all([fetch('data/universe.json' + q, { cache: 'no-cache' }).then(r => r.json()), fetch('data/picks.json' + q, { cache: 'no-cache' }).then(r => r.json())]);
-    META = u.meta || {}; ROWS = u.rows.map(r => Object.fromEntries(u.fields.map((f, i) => [f, r[i]]))); PICKS = p.picks || [];
-  } catch { META = {}; ROWS = []; PICKS = []; }
+    META = u.meta || {}; ROWS = u.rows.map(r => Object.fromEntries(u.fields.map((f, i) => [f, r[i]]))); PICKS = p.picks || []; WAIT = p.wait || [];
+  } catch { META = {}; ROWS = []; PICKS = []; WAIT = []; }
   const opt = f => fetch('data/' + f + q, { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null);
   const [m, e, i] = await Promise.all([opt('market.json'), opt('events.json'), opt('ipos.json')]);
   MARKET = m || {}; EVENTS = e?.events || []; IPOS = i?.ipos || []; IPO_UPDATED = i?.updated || '';
@@ -319,16 +320,22 @@ function viewPicks() {
         <a class="ph" href="#stock/${encodeURIComponent(x.symbol)}"><div><span class="rank">#${i + 1}</span> <b class="sym">${esc(x.symbol)}</b><div class="muted nm">${esc(x.name || '')}</div></div><div class="big" style="color:${scoreColor(x.overall)}">${Math.round(x.overall)}</div></a>
         <div class="pm">${pill(x.signal)} <span class="hint">${esc(x.confidence)} confidence · ${esc(x.sector || '')}</span></div>
         ${hzLine(x.horizon)}
+        ${entryHtml(x.entry)}
         <dl><dt>Expected return</dt><dd class="${x.expected_return >= target() ? 'pos' : ''}">${pc(x.expected_return)}/yr</dd>
-            <dt>12 months</dt><dd>${pc(x.ret_12m)}</dd><dt>vs 200-day avg</dt><dd>${pc(x.vs_200dma)}</dd><dt>RSI</dt><dd>${n(x.rsi, f0)}</dd></dl>
+            <dt>P/E · PEG</dt><dd>${n(x.entry?.pe, f0)} · ${x.entry?.peg != null ? x.entry.peg.toFixed(1) : '—'}</dd>
+            <dt>12 months</dt><dd>${pc(x.ret_12m)}</dd><dt>vs 50-day avg</dt><dd>${pc(x.entry?.vs_50dma)}</dd><dt>vs 200-day avg</dt><dd>${pc(x.vs_200dma)}</dd><dt>RSI</dt><dd>${n(x.rsi, f0)}</dd></dl>
         ${pointsHtml(x.points, true)}
         ${claudeBox(x.symbol)}
       </div>`).join('')}</div>
-      <p class="hint">Picks need a BUY signal, Medium or High confidence, at least ₹${META.scan?.min_traded_cr ?? 2} Cr traded daily, and at most ${META.scan?.max_picks_per_sector ?? 2} per sector. ${PICKS.length < 5 ? `Only ${PICKS.length} stocks cleared the bar; the system doesn't pad the list.` : ''}</p>`
+      <p class="hint">Picks need a BUY signal (business good enough for your return target), an entry-timing score of at least ${META.scan?.min_entry_score ?? 55} (price not stretched vs its averages, RSI not overheated, P/E reasonable for its growth, trend up), Medium or High confidence, at least ₹${META.scan?.min_traded_cr ?? 2} Cr traded daily, and at most ${META.scan?.max_picks_per_sector ?? 2} per sector. ${PICKS.length < 5 ? `Only ${PICKS.length} stocks cleared the bar; the system doesn't pad the list.` : ''}</p>`
       : `<div class="card empty">${ROWS.length ? "No stock cleared the BUY bar in the latest analysis. That happens in expensive or falling markets; the system won't force picks." : 'Run the first full scan to see picks.'}</div>`}
+    ${WAIT.length ? `<div class="card"><div class="cardhead"><h2>Good businesses, wrong price today</h2><span class="hint">BUY-rated, but stretched right now. Buy near the zone, not at today's price.</span></div>
+      <div class="tbox"><table><thead><tr><th>Stock</th><th class="num">Score</th><th class="num">Entry</th><th class="num">Price</th><th class="num">Buy zone</th><th class="hide-sm">Why wait</th></tr></thead><tbody id="waitb">
+      ${WAIT.map(x => `<tr class="click" data-s="${esc(x.symbol)}"><td><b>${esc(x.symbol)}</b><div class="muted" style="font-size:12px">${esc((x.name || '').slice(0, 28))}</div></td><td class="num">${Math.round(x.overall)}</td><td class="num">${x.entry?.score ?? '—'}</td><td class="num">${n(x.price, f0)}</td><td class="num">${x.entry?.zone ? n(x.entry.zone[0], f0) + '–' + n(x.entry.zone[1], f0) : '—'}</td><td class="hide-sm" style="white-space:normal;min-width:200px">${esc((x.entry?.why || []).join('; '))}</td></tr>`).join('')}</tbody></table></div></div>` : ''}
     ${IPOS.filter(x => x.call === 'APPLY').length ? `<div class="card"><div class="cardhead"><h2>IPOs worth applying for</h2><a href="#ipos">All IPOs →</a></div><div class="syms">${IPOS.filter(x => x.call === 'APPLY').map(x => `<a href="#ipos">${esc(x.name)} · ${x.score}</a>`).join('')}</div></div>` : ''}
     <div class="card"><div class="cardhead"><h2>Your portfolio today: ${esc(pf?.name || '')}</h2><a href="#portfolios">Open portfolio →</a></div>${pf ? reportHtml(pf, true) : ''}</div>`;
   wireSync(v);
+  v.querySelectorAll('#waitb tr[data-s]').forEach(tr => tr.addEventListener('click', () => { location.hash = 'stock/' + encodeURIComponent(tr.dataset.s); }));
   wireClaude(v, async sym => stockPrompt(await loadDetail(sym) || BY.get(sym)));
 }
 
@@ -400,7 +407,7 @@ function compactPrompt(d) {
     `${d.symbol}|${d.name}|${d.sector || 'na'}|px ${r(d.price)}`,
     `PE ${r(f.pe)} PB ${r(f.pb)} ROE ${r(f.roe)} DE ${r(f.debt_equity)} DY ${r(f.dividend_yield)} RevCAGR ${r(f.rev_cagr)} PATCAGR ${r(f.profit_cagr)} OCF/PAT ${r(f.cash_conversion)}`,
     `vs200DMA ${r(t.vs_200dma)} rel12m ${r(t.rel_12m)} RSI ${r(t.rsi)} vol ${r(t.volatility)} off52wHi ${r(t.from_52w_high)}`,
-    `model ${d.overall} ${d.signal} ${d.confidence} expRet ${r(d.expected_return)}`,
+    `model ${d.overall} ${d.signal} ${d.confidence} expRet ${r(d.expected_return)}` + (d.entry ? ` entry ${d.entry.score} PEG ${r(d.entry.peg)} vs50DMA ${r(d.entry.vs_50dma)}` : ''),
     h ? `held qty ${h.qty} avg ${h.avg}` : 'not held',
     'news: ' + (d.headlines || []).slice(0, 5).map(x => x.title.slice(0, 90)).join(' ; '),
     (d.filings || []).length ? 'filings: ' + d.filings.slice(0, 3).map(x => x.title.slice(0, 80)).join(' ; ') : '',
@@ -454,7 +461,7 @@ async function viewStock(sym) {
       <p class="sub">${esc(d.sector || '')}${d.industry ? ' · ' + esc(d.industry) : ''} · ₹${n(d.price)} · ${stageLabel(d.stage)} · analysed ${esc(d.analysed || '')}</p></div>
     <div class="card verdict">
       <div class="big" style="color:${scoreColor(d.overall)}">${d.overall ?? '—'}</div>
-      <div><div class="sig">${pill(sigLabel(d.symbol, d.signal))}</div>${d.signal === 'BUY' || h ? hzLine(d.horizon) : ''}<div class="hint" style="margin-top:6px">Confidence <b>${esc(d.confidence)}</b> · data coverage ${Math.round((d.coverage || 0) * 100)}%</div></div>
+      <div><div class="sig">${pill(sigLabel(d.symbol, d.signal))}</div>${d.signal === 'BUY' || h ? hzLine(d.horizon) : ''}${entryHtml(d.entry)}<div class="hint" style="margin-top:6px">Confidence <b>${esc(d.confidence)}</b> · data coverage ${Math.round((d.coverage || 0) * 100)}%</div></div>
       <div style="flex:1 1 260px;min-width:0"><div class="hint">Expected return vs your 15–18% target</div>
         <div class="mono ${d.expected_return >= target() ? 'pos' : 'neg'}" style="font-size:22px">${pc(d.expected_return)} / yr</div>
         <div class="hint">Strong: ${esc((d.strengths || []).join(', '))}<br>Weak: ${esc((d.weaknesses || []).join(', '))}</div></div>
@@ -682,14 +689,15 @@ function viewIpos() {
         <div class="cardhead"><div><h2>${esc(x.name)}</h2><div class="hint">${esc(x.board || '')} · ${esc(x.sector || 'sector unknown')} · ${esc(x.status || '')}${x.open ? ' · ' + esc(x.open) + ' → ' + esc(x.close || '') : ''}${x.price_band ? ' · ₹' + esc(String(x.price_band).replace(/^₹/, '')) : ''}${x.issue_size_cr ? ' · ₹' + n(x.issue_size_cr, f0) + ' Cr' : ''}</div></div>
           <div style="text-align:right">${pill(x.call)}<div class="big" style="color:${scoreColor(x.score)};font-size:30px">${x.score ?? '—'}</div></div></div>
         <p><b>${esc(x.verdict)}</b></p>
+        ${x.about ? `<p class="hint">${esc(x.about)}</p>` : ''}
         ${pointsHtml({ for: x.for, against: x.against })}
         <div class="params" style="margin-top:10px">${x.params.map(p => `<div class="prow"><div>${esc(p.label)} <span class="muted" style="font-size:12px">×${p.weight}</span></div><div class="val">${esc(p.value ?? 'no data')}</div>${bar(p.score)}</div>`).join('')}</div>
         ${x.peers ? `<p class="hint">Listed ${esc(x.sector)} peers: ${x.peers.count} analysed, best ${x.peers.best.map(b => `<a href="#stock/${encodeURIComponent(b)}">${esc(b)}</a>`).join(', ')}.</p>` : ''}
         ${(x.headlines || []).length ? `<ul class="list">${x.headlines.slice(0, 3).map(h => `<li><span class="d">${esc(h.date)}</span><a href="${esc(h.link)}" target="_blank" rel="noopener">${esc(h.title)}</a></li>`).join('')}</ul>` : ''}
-        ${x.rhp_link ? `<p class="hint"><a href="${esc(x.rhp_link)}" target="_blank" rel="noopener">Prospectus (RHP)</a></p>` : ''}
+        ${x.rhp_link ? `<p class="hint"><a href="${esc(x.rhp_link)}" target="_blank" rel="noopener">${/chittorgarh/i.test(x.rhp_link) ? 'Issue details &amp; prospectus figures' : 'Prospectus (RHP)'}</a>${x.fin_years && x.fin_years.length ? ' · financials ' + esc(x.fin_years[0]) + ' – ' + esc(x.fin_years[x.fin_years.length - 1]) : ''}</p>` : ''}
         ${claudeBox('ipo' + i)}
       </div>`).join('')}</div>` : '<div class="card empty">No IPOs found in the latest run.</div>'}
-    <div class="card"><h2>Add an IPO or fill in its financials</h2><p class="sub">NSE's IPO list often blocks cloud servers, and no free feed gives prospectus figures. To analyse any IPO properly, add a row to <code>config/ipos.csv</code> on GitHub with figures from its RHP: revenue and profit for 3 years, net worth, debt, post-issue EPS, and the offer-for-sale %. The next run rates it.</p></div>`;
+    <div class="card"><h2>Add an IPO or fill in its financials</h2><p class="sub">Every open and upcoming IPO is read automatically from its own page: issue size, offer-for-sale share, 3 years of revenue and profit, net worth, debt, post-issue EPS, promoter holding and broker reviews. If an IPO still says NEED DATA, its prospectus figures aren't published yet; you can add them yourself as a row in <code>config/ipos.csv</code> on GitHub, and those figures win.</p></div>`;
   wireClaude(v, async id => ipoPrompt(IPOS[+id.slice(3)]));
 }
 
