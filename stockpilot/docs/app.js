@@ -301,7 +301,7 @@ function actionReasons(r) {
   const lt = META.horizons?.long_term_min_cagr ?? 15, st = META.horizons?.short_term_min_return ?? 12;
   if (!s.signal || (s.stage || 0) < 2) return ['Not analysed yet: it trades too little or has no data. Use "Refresh analysis" on its page.'];
   out.push(`Overall score ${Math.round(s.overall)}/100 (fundamentals ${s.fundamental != null ? Math.round(s.fundamental) : '—'}, technicals ${s.technical != null ? Math.round(s.technical) : '—'}${s.news != null ? ', news ' + Math.round(s.news) : ''}); confidence ${s.confidence || '—'}.`);
-  if (er != null) out.push(`Expected return about ${er.toFixed(0)}%/yr vs your target of ${lt}–18%/yr long term${er >= lt ? ': meets it' : er >= st ? ': below target, only fits a short-term view' : ': well below target'}.`);
+  if (er != null) out.push(`Expected return about ${er.toFixed(0)}%/yr vs your ${target()}%/yr target${er >= target() ? ': meets it' : er >= st ? ': below target, only fits a short-term view' : ': well below target'}.`);
   if (r.action === 'EXIT') out.push('The model rates it SELL: weak enough that the money is likely to do better elsewhere.');
   if (r.action === 'HOLD (already large)') out.push(`Rated BUY, but it is already ${w.toFixed(1)}% of this portfolio (8% is the cap per stock), so hold rather than add.`);
   else if (r.action === 'BUY MORE') out.push(`Rated BUY and only ${w.toFixed(1)}% of the portfolio, so there is room to add (check the entry timing on its page first).`);
@@ -312,11 +312,21 @@ function actionReasons(r) {
   if (s.horizon?.note) out.push(s.horizon.note);
   return out;
 }
-async function toggleWhy(btn, r) {
+function portfolioRisks(r, all) {
+  const out = [], w = r.w * 100, sec = r.s?.sector;
+  if (w >= 8) out.push(`Concentration: this one stock is ${w.toFixed(1)}% of the portfolio; a 30% fall would cost the whole portfolio about ${(w * 0.3).toFixed(1)}%.`);
+  if (sec) { const sw = all.filter(x => x.s?.sector === sec).reduce((a, x) => a + x.w, 0) * 100; if (sw >= 25) out.push(`Sector concentration: ${sec} makes up ${sw.toFixed(0)}% of this portfolio.`); }
+  if (r.gainp != null && r.gainp <= -25) out.push(`Deep loss (${r.gainp.toFixed(0)}%): averaging down only makes sense if the business case still holds.`);
+  if (r.gainp != null && r.gainp >= 100 && w >= 5) out.push(`Up ${r.gainp.toFixed(0)}%: consider booking part of the gain if it has grown beyond your intended weight.`);
+  if (r.s && (r.s.stage || 0) < 3) out.push('News and filings were not checked in the latest run; look at recent announcements yourself.');
+  if (r.s?.confidence === 'Low') out.push('Low confidence: the data on this stock is incomplete, so the call is less reliable.');
+  return out;
+}
+async function toggleWhy(btn, r, all = []) {
   const tr = btn.closest('tr'), next = tr.nextElementSibling;
   if (next?.classList.contains('whyrow')) { next.remove(); btn.setAttribute('aria-expanded', 'false'); return; }
   const row = document.createElement('tr'); row.className = 'whyrow';
-  row.innerHTML = `<td colspan="12"><div class="whybox"><div class="ph">Why ${esc(r.action)} for ${esc(r.symbol)}</div><ul>${actionReasons(r).map(x => `<li>${esc(x)}</li>`).join('')}</ul><div class="whypts muted">Loading the stock's reasons…</div><a href="#stock/${encodeURIComponent(r.symbol)}">Full analysis →</a></div></td>`;
+  row.innerHTML = `<td colspan="12"><div class="whybox"><div class="ph">Why ${esc(r.action)} for ${esc(r.symbol)}</div><ul>${actionReasons(r).map(x => `<li>${esc(x)}</li>`).join('')}</ul>${(() => { const pr = portfolioRisks(r, all); return pr.length ? `<div class="ph neg">Risks for your portfolio</div><ul>${pr.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : ''; })()}<div class="ph">The stock: for and against</div><div class="whypts muted">Loading the stock's reasons…</div><a href="#stock/${encodeURIComponent(r.symbol)}">Full analysis →</a></div></td>`;
   tr.after(row); btn.setAttribute('aria-expanded', 'true');
   const d = r.s && (r.s.stage || 0) >= 2 ? await loadDetail(r.symbol).catch(() => null) : null;
   const box = row.querySelector('.whypts');
@@ -671,7 +681,7 @@ function viewPortfolios() {
     const del = e.target.closest('[data-del]');
     if (del) { e.stopPropagation(); p.holdings = p.holdings.filter(h => h.symbol !== del.dataset.del); savePf(); viewPortfolios(); return; }
     const why = e.target.closest('[data-why]');
-    if (why) { e.stopPropagation(); toggleWhy(why, rows.find(r => r.symbol === why.dataset.why)); return; }
+    if (why) { e.stopPropagation(); toggleWhy(why, rows.find(r => r.symbol === why.dataset.why), rows); return; }
     if (e.target.closest('.whyrow')) return;
     const tr = e.target.closest('tr[data-s]'); if (tr) location.hash = 'stock/' + encodeURIComponent(tr.dataset.s);
   });
