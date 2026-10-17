@@ -93,7 +93,12 @@ def entry_timing(f: dict, t: dict, peg: float | None) -> dict | None:
     if not trend_ok:
         score = min(score, 45)  # don't buy into a falling trend
     lo, hi_z = round(d50 * 0.98, 2), round(d50 * 1.04, 2)
-    if score >= 65:
+    near_high = hi is not None and hi > -5
+    if near_high:
+        score = min(score, 54)  # at/near the 52-week high: never a top pick, goes to the wait list
+    if near_high and trend_ok:
+        verdict = f"Near its 52-week high: wait for a dip to ₹{lo:,.0f}–{hi_z:,.0f}, or buy only in small parts"
+    elif score >= 65:
         verdict = "Good entry now"
     elif score >= 50:
         verdict = "Fair entry: buy in 2–3 parts"
@@ -103,7 +108,8 @@ def entry_timing(f: dict, t: dict, peg: float | None) -> dict | None:
         verdict = f"Wait for a dip to ₹{lo:,.0f}–{hi_z:,.0f}"
     weak = sorted((p for p in parts if p[1] < 50), key=lambda p: p[1])
     good = sorted((p for p in parts if p[1] >= 75), key=lambda p: -p[1])
-    why = [p[3] for p in weak[:3]] + ([] if trend_ok else ["price below its 200-day avg or 50-day below 200-day"])
+    why = ([f"within {abs(hi):.0f}% of its 52-week high" if hi < -0.5 else "at its 52-week high"] if near_high else []) + \
+          [p[3] for p in weak[:3] if not (near_high and p[0] == "52-week high")] + ([] if trend_ok else ["price below its 200-day avg or 50-day below 200-day"])
     return {"score": round(score), "verdict": verdict, "zone": [lo, hi_z], "trend_ok": trend_ok,
             "why": why, "good": [p[3] for p in good[:3]], "vs_50dma": round(ext50, 1),
             "peg": round(peg, 2) if peg is not None else None, "pe": round(f["pe"], 1) if f.get("pe") else None}
