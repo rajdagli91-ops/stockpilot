@@ -186,3 +186,11 @@ body.locked>header,body.locked>main,body.locked>#banner,body.locked>footer{displ
 .entry{border-left:3px solid var(--nodata);padding:6px 10px;border-radius:6px;background:rgba(127,127,127,.06);font-size:13px;line-height:1.45}
 .entry.good{border-color:var(--buy)}.entry.fair{border-color:#e0b341}.entry.wait{border-color:var(--sell)}
 .entry .hint{margin-top:2px}
+
+.whybtn{all:unset;cursor:pointer;display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap}
+.whybtn:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+.whylink{font-size:11px;color:var(--accent);white-space:nowrap}
+.whyrow td{background:var(--soft);white-space:normal}
+.whybox{display:flex;flex-direction:column;gap:10px;padding:6px 2px;font-size:13px;max-width:900px}
+.whybox>ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.whybox .ph{font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
