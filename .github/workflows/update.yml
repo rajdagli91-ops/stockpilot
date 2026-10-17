@@ -115,6 +115,10 @@ jobs:
             git pull -q --rebase && git push -q || echo "cache push skipped"
           fi
 
+      - name: Make browsers load the new site code (cache-busting)
+        working-directory: ${{ steps.p.outputs.dir }}
+        run: sed -i -E "s/(app\.js|style\.css)(\?v=[0-9]+)?\"/\1?v=${GITHUB_RUN_ID}\"/g" docs/index.html
+
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
