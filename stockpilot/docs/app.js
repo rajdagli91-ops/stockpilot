@@ -783,7 +783,16 @@ async function readFile(file) {
   }
   if (typeof XLSX === 'undefined') throw new Error('Excel reader did not load; save the file as CSV and upload that.');
   const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' });
-  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: false });
+  // Some broker exports declare a too-small sheet size (e.g. A1:K12) though more rows exist; Excel shows them all but the
+  // reader would stop at the declared size. Recompute the real range from the cells actually present.
+  const pick = wb.SheetNames.map(n => wb.Sheets[n]).map(ws => {
+    let r1 = 1e9, c1 = 1e9, r2 = -1, c2 = -1;
+    for (const k of Object.keys(ws)) { if (k[0] === '!') continue; const a = XLSX.utils.decode_cell(k); r1 = Math.min(r1, a.r); c1 = Math.min(c1, a.c); r2 = Math.max(r2, a.r); c2 = Math.max(c2, a.c); }
+    if (r2 >= 0) ws['!ref'] = XLSX.utils.encode_range({ s: { r: r1, c: c1 }, e: { r: r2, c: c2 } });
+    return XLSX.utils.sheet_to_json(ws, { header: 1, raw: false });
+  });
+  // use the sheet that looks like holdings (has a quantity header), not always the first one
+  return pick.find(rows => rows.some(r => (r || []).some(c => /qty|quantity|no\.? ?of shares|shares|units/i.test(String(c ?? ''))))) || pick[0];
 }
 
 let pfSort = { key: 'val', dir: -1 };
