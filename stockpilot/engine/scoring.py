@@ -323,6 +323,11 @@ def action_points(params, signal, er, t, flags, macro_why, horizon=None, f=None,
     con = [BAD[k](v[3]) for k, v in bad[:4]]
     if macro_why:
         (pro if (params["global"][2] or 50) >= 50 else con).append("Global: " + "; ".join(macro_why[:2]))
+    if not pro:  # every call shows both sides: name the strongest points even when none is outstanding
+        best = sorted(((k, v) for k, v in have if k not in ("red_flags", "news", "global")), key=lambda kv: -kv[1][2])[:2]
+        pro += [f"Best point: {v[0].lower()} scores {v[2]:.0f}/100" for _, v in best if v[2] >= 40]
+        if not pro:
+            pro.append("No clear strengths in the current data")
     if f is not None:
         seen = " ".join(con).lower()
         extra = [x for x in risk_points(params, f, t, entry, len(con))
