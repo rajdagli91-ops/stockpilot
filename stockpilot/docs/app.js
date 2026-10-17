@@ -294,6 +294,35 @@ function actionFor(row, weight) {
   if (row.expected_return != null && row.expected_return < 12) return 'HOLD / REVIEW';
   return 'HOLD';
 }
+// ---- why a portfolio call: the portfolio-specific reasons + the stock's own for/against
+function actionReasons(r) {
+  const s = r.s || {}, out = [], er = s.expected_return, w = r.w * 100, g = r.gainp;
+  const lt = META.horizons?.long_term_min_cagr ?? 15, st = META.horizons?.short_term_min_return ?? 12;
+  if (!s.signal || (s.stage || 0) < 2) return ['Not analysed yet: it trades too little or has no data. Use "Refresh analysis" on its page.'];
+  out.push(`Overall score ${Math.round(s.overall)}/100 (fundamentals ${s.fundamental != null ? Math.round(s.fundamental) : '—'}, technicals ${s.technical != null ? Math.round(s.technical) : '—'}${s.news != null ? ', news ' + Math.round(s.news) : ''}); confidence ${s.confidence || '—'}.`);
+  if (er != null) out.push(`Expected return about ${er.toFixed(0)}%/yr vs your target of ${lt}–18%/yr long term${er >= lt ? ': meets it' : er >= st ? ': below target, only fits a short-term view' : ': well below target'}.`);
+  if (r.action === 'EXIT') out.push('The model rates it SELL: weak enough that the money is likely to do better elsewhere.');
+  if (r.action === 'HOLD (already large)') out.push(`Rated BUY, but it is already ${w.toFixed(1)}% of this portfolio (8% is the cap per stock), so hold rather than add.`);
+  else if (r.action === 'BUY MORE') out.push(`Rated BUY and only ${w.toFixed(1)}% of the portfolio, so there is room to add (check the entry timing on its page first).`);
+  else if (r.action === 'HOLD / REVIEW') out.push('Not a sell, but its expected return is below 12%/yr; review it at the next quarterly result.');
+  else if (r.action === 'HOLD') out.push('Not strong enough to add to, not weak enough to sell.');
+  else if (r.action === 'SHORT-TERM TRADE') out.push('Rated BUY for a short-term move only; set the stop-loss shown on its page.');
+  if (g != null) out.push(`You are ${g >= 0 ? 'up' : 'down'} ${Math.abs(g).toFixed(0)}% on this holding${g < -25 && r.action === 'EXIT' ? '. The loss is already taken; the question is only where the money grows best from here' : ''}.`);
+  if (s.horizon?.note) out.push(s.horizon.note);
+  return out;
+}
+async function toggleWhy(btn, r) {
+  const tr = btn.closest('tr'), next = tr.nextElementSibling;
+  if (next?.classList.contains('whyrow')) { next.remove(); btn.setAttribute('aria-expanded', 'false'); return; }
+  const row = document.createElement('tr'); row.className = 'whyrow';
+  row.innerHTML = `<td colspan="12"><div class="whybox"><div class="ph">Why ${esc(r.action)} for ${esc(r.symbol)}</div><ul>${actionReasons(r).map(x => `<li>${esc(x)}</li>`).join('')}</ul><div class="whypts muted">Loading the stock's reasons…</div><a href="#stock/${encodeURIComponent(r.symbol)}">Full analysis →</a></div></td>`;
+  tr.after(row); btn.setAttribute('aria-expanded', 'true');
+  const d = r.s && (r.s.stage || 0) >= 2 ? await loadDetail(r.symbol).catch(() => null) : null;
+  const box = row.querySelector('.whypts');
+  if (d?.points) { box.classList.remove('muted'); box.innerHTML = pointsHtml({ ...d.points, verdict: d.points.verdict }); }
+  else if (d && (d.strengths || d.weaknesses)) { box.classList.remove('muted'); box.innerHTML = pointsHtml({ for: d.strengths || [], against: d.weaknesses || [] }); }
+  else box.textContent = 'No detailed reasons available for this stock yet.';
+}
 function pointsHtml(pts, compact = false) {
   if (!pts) return '';
   const li = xs => xs.map(x => `<li>${esc(x)}</li>`).join('');
@@ -577,7 +606,7 @@ function viewPortfolios() {
     <td class="num hide-sm">${n(r.qty, f0)}</td><td class="num hide-sm">${n(r.avg)}</td><td class="num hide-sm">${r.priced ? n(r.px) : '—'}</td>
     <td class="num">${inr(r.val)}</td><td class="num">${(r.w * 100).toFixed(1)}%</td><td class="num hide-sm">${pc(r.er)}</td>
     <td class="num ${r.gainp >= 0 ? 'pos' : 'neg'}">${pc(r.gainp)}</td>
-    <td>${pill(r.action)}${r.s?.horizon ? `<div class="hint">${esc(hzText(r.s.horizon))}</div>` : ''}</td>
+    <td><button class="whybtn" data-why="${esc(r.symbol)}" aria-expanded="false" title="Why this call?">${pill(r.action)}<span class="whylink">Why? ▾</span></button>${r.s?.horizon ? `<div class="hint">${esc(hzText(r.s.horizon))}</div>` : ''}</td>
     <td><button class="btn ghost small" data-del="${esc(r.symbol)}" aria-label="Remove ${esc(r.symbol)}">✕</button></td></tr>`).join('')
     : '<tr><td colspan="12" class="empty">No holdings yet. Add one above or upload your broker file.</td></tr>';
 
@@ -589,6 +618,9 @@ function viewPortfolios() {
   $('#pt tbody').addEventListener('click', e => {
     const del = e.target.closest('[data-del]');
     if (del) { e.stopPropagation(); p.holdings = p.holdings.filter(h => h.symbol !== del.dataset.del); savePf(); viewPortfolios(); return; }
+    const why = e.target.closest('[data-why]');
+    if (why) { e.stopPropagation(); toggleWhy(why, rows.find(r => r.symbol === why.dataset.why)); return; }
+    if (e.target.closest('.whyrow')) return;
     const tr = e.target.closest('tr[data-s]'); if (tr) location.hash = 'stock/' + encodeURIComponent(tr.dataset.s);
   });
   $('#pftabs').addEventListener('click', e => { const b = e.target.closest('button'); if (!b) return; activePf = b.dataset.id; LS.set('activePf', activePf); viewPortfolios(); });
