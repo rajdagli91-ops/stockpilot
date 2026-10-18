@@ -198,38 +198,95 @@ async function gh(path, opts = {}) {
   if (!r.ok && r.status !== 204) { let m = r.statusText; try { m = (await r.json()).message; } catch { } throw new Error(`GitHub ${r.status}: ${m}`); }
   return r.status === 204 ? null : r.json();
 }
+async function activeRuns() {
+  const j = await gh('/actions/workflows/update.yml/runs?per_page=6');
+  return (j.workflow_runs || []).filter(r => r.status !== 'completed');
+}
 async function dispatch(mode, symbols = '') {
   if (!ghReady()) { toast('Set up GitHub in Settings first.'); location.hash = 'settings'; return; }
   try {
+    const act = await activeRuns().catch(() => []);
+    if (act.length) { toast('An update is already running. Its progress is shown at the top; the new results load by themselves.'); pollRun(); return; }
     await gh('/actions/workflows/update.yml/dispatches', { method: 'POST', body: JSON.stringify({ ref: 'main', inputs: { mode, symbols } }) });
     LS.set('run', { since: Date.now(), mode, symbols });
-    toast({ full: 'Full market scan started (about 45 minutes).', symbols: `Analysing ${symbols}… (2–3 minutes)`, portfolio: 'Fetching your portfolio stocks (about 3 minutes)…' }[mode] || 'Fetching fresh data (about 5 minutes)…');
+    showRunBar({ mode, symbols, stage: 'Starting…', pct: 2, mins: 0 });
     pollRun();
   } catch (e) { toast('Could not start: ' + e.message); }
+}
+// ---- progress bar for a running update (yours, a scheduled one, or one started on another device)
+const RUN_MIN = { portfolio: 4, symbols: 4, quick: 8, full: 16 };  // typical minutes, end to end
+const RUN_NAME = { portfolio: 'Fetching your portfolio stocks', symbols: 'Analysing', quick: 'Updating prices, news and picks', full: 'Full market scan', scheduled: 'Scheduled update' };
+const STAGES = [  // [step name pattern, what to show, share of the run]
+  [/set up job|checkout|project folder|setup-python|pip install|choose mode/i, 'Getting ready', 6],
+  [/load previous/i, 'Loading previous results', 4],
+  [/fetch data/i, 'Fetching prices, fundamentals and news, then scoring', 76],
+  [/save results|nse list/i, 'Saving results', 5],
+  [/cache-busting|pages/i, 'Publishing to the site', 9]];
+function showRunBar(x) {
+  const el = $('#runbar'); if (!el) return;
+  if (!x) { el.hidden = true; el.innerHTML = ''; return; }
+  const left = x.left != null ? (x.left <= 1 ? 'about a minute left' : `about ${x.left} min left`) : '';
+  el.hidden = false;
+  el.className = 'runbar' + (x.state ? ' ' + x.state : '');
+  el.innerHTML = `<div class="wrap"><div class="rb-top"><b>${esc((RUN_NAME[x.mode] || 'Updating') + (x.mode === 'symbols' && x.symbols ? ' ' + x.symbols : ''))}</b>
+    <span class="rb-stage">${esc(x.stage)}</span><span class="rb-meta">${[x.mins != null ? x.mins + ' min' : '', left, x.queued ? `${x.queued} more queued` : '', x.url ? `<a href="${esc(x.url)}" target="_blank" rel="noopener">details</a>` : ''].filter(Boolean).join(' · ')}</span></div>
+    <div class="rb-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(x.pct)}" aria-label="Update progress"><i style="width:${Math.max(2, Math.min(100, x.pct))}%"></i></div></div>`;
 }
 let pollTimer = null;
 async function pollRun() {
   clearTimeout(pollTimer);
   const job = LS.get('run', null), st = $('#runstate');
-  if (!job || !ghReady()) { st.textContent = ''; $('#fetch').disabled = false; return; }
-  $('#fetch').disabled = true;
+  if (!ghReady()) { showRunBar(null); return; }
   try {
-    const j = await gh('/actions/workflows/update.yml/runs?per_page=5&event=workflow_dispatch');
-    const run = (j.workflow_runs || []).find(r => new Date(r.created_at).getTime() >= job.since - 90000);
-    if (!run) st.textContent = 'Starting…';
-    else if (run.status !== 'completed') {
-      const mins = Math.max(0, Math.round((Date.now() - new Date(run.run_started_at || run.created_at)) / 60000));
-      st.innerHTML = `${run.status === 'queued' ? 'Queued' : 'Running'} · ${mins} min · <a href="${esc(run.html_url)}" target="_blank" rel="noopener">details</a>`;
-    } else {
-      LS.set('run', null); $('#fetch').disabled = false; REPORTS = null;
-      if (run.conclusion === 'success') {
-        st.textContent = 'Updated';
-        setTimeout(async () => { await loadData(true); go(); toast('Fresh results loaded.'); }, 15000);
-      } else { st.innerHTML = `Run ${esc(run.conclusion)} · <a href="${esc(run.html_url)}" target="_blank" rel="noopener">see log</a>`; }
+    const j = await gh('/actions/workflows/update.yml/runs?per_page=6');
+    const runs = j.workflow_runs || [];
+    const active = runs.filter(r => r.status !== 'completed').sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+    const mine = job ? runs.find(r => new Date(r.created_at).getTime() >= job.since - 90000) : null;
+    const run = active.find(r => r.status === 'in_progress') || active[0] || mine;
+    if (!run) {
+      if (job && Date.now() - job.since < 120000) { showRunBar({ ...job, stage: 'Starting…', pct: 2, mins: 0 }); pollTimer = setTimeout(pollRun, 5000); return; }
+      LS.set('run', null); showRunBar(null); $('#fetch').disabled = false; if (st) st.textContent = ''; return;
+    }
+    const mode = mine && mine.id === run.id ? job.mode : run.event === 'schedule' ? (new Date(run.created_at).getUTCHours() < 3 ? 'full' : 'quick') : (job?.mode || 'scheduled');
+    const base = { mode, symbols: job?.symbols, url: run.html_url, queued: Math.max(0, active.length - 1) };
+    if (run.status !== 'completed') {
+      $('#fetch').disabled = true;
+      const t0 = new Date(run.run_started_at || run.created_at).getTime(), mins = Math.max(0, Math.round((Date.now() - t0) / 60000));
+      let pct = 1, stage = run.status === 'queued' || run.status === 'pending' || run.status === 'waiting' ? 'Waiting for GitHub to start it (usually under a minute)' : 'Getting ready';
+      if (run.status === 'in_progress') {
+        const jobs = await gh(`/actions/runs/${run.id}/jobs`).catch(() => null);
+        const steps = jobs?.jobs?.[0]?.steps || [];
+        const exp = (RUN_MIN[mode] || 8) * 60000;
+        let done = 0;
+        for (const sp of steps) {
+          const g = STAGES.find(([re]) => re.test(sp.name)); if (!g) continue;
+          const share = g[2] / steps.filter(x => STAGES.find(([re]) => re.test(x.name) && re === g[0])).length;
+          if (sp.status === 'completed') done += share;
+          else if (sp.status === 'in_progress') {
+            stage = g[1];
+            const el = sp.started_at ? Date.now() - new Date(sp.started_at) : 0;
+            const frac = /fetch data/i.test(sp.name) ? Math.min(0.97, el / (exp * 0.76)) : 0.5;
+            done += share * frac;
+          }
+        }
+        pct = Math.max(3, Math.min(99, done));
+      }
+      const left = Math.max(0, Math.round((RUN_MIN[mode] || 8) - mins));
+      showRunBar({ ...base, stage, pct, mins, left: run.status === 'in_progress' ? left : null });
+      if (st) st.textContent = '';
+      pollTimer = setTimeout(pollRun, 6000);
       return;
     }
-  } catch (e) { st.textContent = e.message; }
-  pollTimer = setTimeout(pollRun, 15000);
+    // finished
+    LS.set('run', null); $('#fetch').disabled = false; REPORTS = null;
+    if (run.conclusion === 'success') {
+      showRunBar({ ...base, state: 'ok', stage: 'Done. Loading the fresh results…', pct: 100 });
+      setTimeout(async () => { await loadData(true); go(); showRunBar(null); toast('Fresh results loaded.'); }, 12000);
+    } else {
+      showRunBar({ ...base, state: 'bad', stage: `Stopped (${run.conclusion}). Nothing changed on the site; open details to see why.`, pct: 100 });
+      setTimeout(() => showRunBar(null), 60000);
+    }
+  } catch (e) { if (st) st.textContent = e.message; pollTimer = setTimeout(pollRun, 15000); }
 }
 // ---- encryption (matches engine/secure.py: PBKDF2-SHA256 200k -> AES-256-GCM)
 const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
