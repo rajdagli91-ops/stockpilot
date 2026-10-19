@@ -173,10 +173,12 @@ async function loadData(bust = false) {
     META = u.meta || {}; ROWS = u.rows.map(r => Object.fromEntries(u.fields.map((f, i) => [f, r[i]]))); PICKS = p.picks || []; WAIT = p.wait || [];
   } catch { META = {}; ROWS = []; PICKS = []; WAIT = []; }
   const opt = f => fetch('data/' + f + q, { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null);
-  const [m, e, i] = await Promise.all([opt('market.json'), opt('events.json'), opt('ipos.json')]);
+  const [m, e, i, is, rs] = await Promise.all([opt('market.json'), opt('events.json'), opt('ipos.json'), opt('isin.json'), opt('resolved.json')]);
+  ISIN = is || {}; RESOLVED = rs || {};
   MARKET = m || {}; EVENTS = e?.events || []; IPOS = i?.ipos || []; IPO_UPDATED = i?.updated || '';
   BY = new Map(ROWS.map(r => [r.symbol, r]));
   detailCache.clear();
+  if (applyResolved()) toast('Found the stocks you added on NSE / BSE and loaded their data.');
   $('#updated').textContent = META.updated ? 'Data ' + META.updated : '';
   const b = $('#banner');
   if (!ROWS.length) b.innerHTML = '<div class="banner">No data yet. Click <b>Fetch now</b> (needs GitHub set up in Settings) or run the workflow in GitHub Actions.</div>';
@@ -836,6 +838,10 @@ async function viewStock(sym) {
 }
 
 // ================================================================ portfolios
+// what you type or a broker gives: NSE symbol, BSE code (500325) or BSE symbol (XYZ.BO)
+const normSym = x => { const u = String(x || '').trim().toUpperCase(); return /^\d{6}$/.test(u) ? u + '.BO' : u.replace(/\.NS$/, ''); };
+const isPlaceholder = sym => String(sym || '').startsWith('?');
+let ISIN = {}, RESOLVED = {};
 function matchSymbol(raw) {
   if (!raw) return null;
   const s = String(raw).trim(), up = s.toUpperCase();
@@ -857,7 +863,7 @@ function parseRows(rows) {
   const col = re => hdr.findIndex(h => re.test(h));
   const cSym = col(/symbol|tradingsymbol|instrument/), cName = col(/security|stock|scrip|name|company/);
   const cQty = col(QTY), cAvg = col(/avg|average|buy price|cost price|purchase price|buy rate/);
-  const cInv = col(/invested|investment|buy value|cost value|purchase value|total cost/);
+  const cInv = col(/invested|investment|buy value|cost value|purchase value|total cost/), cIsin = col(/isin/);
   if (cAvg < 0 && cInv < 0) throw new Error('Could not find an Average price (or Invested value) column.');
   const out = [], skipped = [];
   for (const r of rows.slice(hi + 1)) {
@@ -867,7 +873,8 @@ function parseRows(rows) {
     if (!raw || /^(total|grand total|net)/i.test(String(raw).trim())) continue;  // blank and total rows
     if (!(qty > 0)) { if (String(r[cQty] ?? '').trim() !== '') skipped.push({ raw: String(raw).trim(), qty: 0, avg: avg > 0 ? avg : 0, why: 'quantity is zero or unreadable' }); continue; }
     if (!(avg > 0)) { skipped.push({ raw: String(raw).trim(), qty, avg: 0, why: 'no average price (bonus / gifted / transferred shares?)' }); continue; }
-    out.push({ raw: String(raw).trim(), qty, avg, ticker: cSym >= 0 && !!r[cSym] });
+    const isin = cIsin >= 0 ? String(r[cIsin] || '').trim().toUpperCase() : '';
+    out.push({ raw: String(raw).trim(), qty, avg, ticker: cSym >= 0 && !!r[cSym], isin: /^IN[A-Z0-9]{10}$/.test(isin) ? isin : '' });
   }
   out.skipped = skipped;
   return out;
@@ -898,6 +905,14 @@ function viewPortfolios() {
   if (!portfolios.length) { portfolios = [{ id: 'p' + Date.now(), name: 'My portfolio', holdings: [] }]; savePf(); }
   if (!portfolios.find(p => p.id === activePf)) activePf = portfolios[0].id;
   const p = portfolios.find(x => x.id === activePf);
+  // rows an older import left as "not recognised" are now looked up automatically instead of asking you
+  const old = (p.pending || []).filter(r => /not recognised/.test(r.why || '') && r.qty > 0 && r.avg > 0);
+  if (old.length) {
+    p.pending = p.pending.filter(r => !old.includes(r));
+    old.forEach(r => { const s = matchSymbol(r.raw) || '?NAME:' + r.raw.toUpperCase().replace(/\s+/g, ' ').slice(0, 60); if (!p.holdings.some(h => h.symbol === s)) p.holdings.push({ symbol: s, raw: r.raw, qty: r.qty, avg: r.avg }); });
+    applyResolved(); savePf();
+    if (p.holdings.some(h => isPlaceholder(h.symbol))) setTimeout(autoLookup, 300);
+  }
   const st = pfStats(p);
   const v = $('#view');
   v.innerHTML = `
@@ -934,7 +949,8 @@ function viewPortfolios() {
   const rows = st.rows.map(r => ({ ...r, signal: r.s?.stage >= 2 ? r.s.signal : '', score: r.s?.stage >= 2 ? r.s.overall : null, hold: rowHold(r.s)?.score ?? null, er: r.s?.expected_return ?? null, gainp: r.px ? (r.px / r.avg - 1) * 100 : null, action: actionFor(r.s, r.w) }))
     .sort((a, b) => { const x = a[pfSort.key], y = b[pfSort.key]; if (x == null || x === '') return 1; if (y == null || y === '') return -1; return (typeof x === 'string' ? x.localeCompare(y) : x - y) * pfSort.dir; });
   $('#pt tbody').innerHTML = rows.length ? rows.map(r => `<tr class="click" data-s="${esc(r.symbol)}">
-    <td><b>${esc(r.symbol)}</b>${r.raw && r.raw !== r.symbol ? `<div class="muted" style="font-size:12px">${esc(r.raw)}</div>` : ''}</td>
+    <td>${isPlaceholder(r.symbol) ? `<b>${esc(r.raw || r.symbol.slice(6))}</b><div class="hint">Looking it up on NSE / BSE${r.isin ? ' by ISIN' : ''}: happens on the next fetch</div>`
+      : `<b>${esc(r.symbol.replace(/\.BO$/, ''))}</b>${r.symbol.endsWith('.BO') ? ' <span class="pill NO">BSE</span>' : ''}${r.raw && r.raw !== r.symbol ? `<div class="muted" style="font-size:12px">${esc(r.raw)}</div>` : ''}`}</td>
     <td><button class="whybtn" data-why="${esc(r.symbol)}" aria-expanded="false" title="Why this call?">${pill(r.action)}<span class="whylink">Why? ▾</span></button>${r.s?.horizon ? `<div class="hint">${esc(hzText(r.s.horizon))}</div>` : ''}</td><td>${bar(r.hold)}</td><td class="hide-sm">${bar(r.score)}</td>
     <td class="num hide-sm">${n(r.qty, f0)}</td><td class="num hide-sm">${n(r.avg)}</td><td class="num hide-sm">${r.priced ? n(r.px) : '—'}</td>
     <td class="num">${inr(r.val)}</td><td class="num">${(r.w * 100).toFixed(1)}%</td><td class="num hide-sm">${pc(r.er)}</td>
@@ -975,11 +991,12 @@ function viewPortfolios() {
     if (!(await brokerImport(file, np))) { portfolios = portfolios.filter(x => x !== np); activePf = p.id; LS.set('activePf', p.id); savePf(); viewPortfolios(); }
   });
   $('#hadd').addEventListener('click', () => {
-    const sym = $('#hsym').value.trim().toUpperCase(), qty = +$('#hqty').value, avg = +$('#havg').value;
+    const sym = normSym($('#hsym').value), qty = +$('#hqty').value, avg = +$('#havg').value;
     if (!sym || !(qty > 0) || !(avg > 0)) { alert('Enter symbol, quantity and average price.'); return; }
     const ex = p.holdings.find(h => h.symbol === sym);
     if (ex) Object.assign(ex, { qty, avg }); else p.holdings.push({ symbol: sym, qty, avg });
     savePf(); viewPortfolios();
+    if (!BY.has(sym)) { toast(`${sym} isn't in today's data yet; fetching it now.`); autoLookup(); }
   });
   $('#upl').addEventListener('change', async e => { const file = e.target.files[0]; e.target.value = ''; if (file) await brokerImport(file, p); });
 }
@@ -988,29 +1005,62 @@ async function brokerImport(file, p) {
     const parsed = parseRows(await readFile(file)), matched = [], unmatched = [];
     if (!parsed.length && !parsed.skipped.length) throw new Error('No holdings rows found (each row needs a stock, a quantity and an average price).');
     parsed.forEach(r => {
-      let s = matchSymbol(r.raw);
+      let s = (r.isin && ISIN[r.isin]) || matchSymbol(r.raw);
       // a clean ticker from the broker's Symbol column is kept even if today's scan doesn't list it (SME, BSE-only, ETF...)
       if (!s && r.ticker && /^[A-Z0-9&-]{2,20}$/.test(r.raw.toUpperCase().replace(/-(EQ|BE|BZ|SM|ST)$/, ''))) s = r.raw.toUpperCase().replace(/-(EQ|BE|BZ|SM|ST)$/, '');
+      if (!s && r.isin && RESOLVED['?ISIN:' + r.isin]?.symbol) s = RESOLVED['?ISIN:' + r.isin].symbol;
+      // not in today's NSE list: keep it and let the next fetch find it on NSE or BSE by ISIN / name
+      if (!s) s = r.isin ? '?ISIN:' + r.isin : '?NAME:' + r.raw.toUpperCase().replace(/\s+/g, ' ').slice(0, 60);
       (s ? matched : unmatched).push({ ...r, symbol: s });
     });
     const merge = {};
-    matched.forEach(r => { const m = merge[r.symbol]; if (m) { m.avg = (m.avg * m.qty + r.avg * r.qty) / (m.qty + r.qty); m.qty += r.qty; m.merged = (m.merged || 1) + 1; } else merge[r.symbol] = { symbol: r.symbol, raw: r.raw, qty: r.qty, avg: r.avg }; });
+    matched.forEach(r => { const m = merge[r.symbol]; if (m) { m.avg = (m.avg * m.qty + r.avg * r.qty) / (m.qty + r.qty); m.qty += r.qty; m.merged = (m.merged || 1) + 1; } else merge[r.symbol] = { symbol: r.symbol, raw: r.raw, qty: r.qty, avg: r.avg, ...(r.isin ? { isin: r.isin } : {}) }; });
     const merged = Object.values(merge).filter(m => m.merged).map(m => `${m.symbol} (${m.merged} rows)`); Object.values(merge).forEach(m => delete m.merged);
     p.holdings = Object.values(merge);
     // anything not loaded stays listed on the portfolio page until you fix or dismiss it
     p.pending = [...unmatched.map(r => ({ raw: r.raw, qty: r.qty, avg: r.avg, why: 'stock not recognised: type its NSE symbol' })), ...parsed.skipped];
-    savePf(); viewPortfolios();
+    applyResolved(); savePf(); viewPortfolios();
+    const lookups = p.holdings.filter(h => isPlaceholder(h.symbol)).length;
     const total = parsed.length + parsed.skipped.length;
-    toast(`Read ${total} rows from the file: ${p.holdings.length} stocks loaded${merged.length ? ` (${merged.join(', ')} combined)` : ''}${p.pending.length ? `; ${p.pending.length} not loaded, listed on the page` : ''}. Press Save to cloud when done.`, 9000);
+    toast(`Read ${total} rows from the file: ${p.holdings.length} stocks loaded${merged.length ? ` (${merged.join(', ')} combined)` : ''}${lookups ? `, ${lookups} being looked up on NSE/BSE` : ''}${p.pending.length ? `; ${p.pending.length} need your input, listed on the page` : ''}.`, 9000);
+    if (lookups) autoLookup();
     return true;
   } catch (err) { alert('Upload failed: ' + err.message); return false; }
+}
+// apply what the last fetch found for holdings the site didn't recognise; ones it couldn't find go to "need your input"
+function applyResolved() {
+  let changed = false;
+  for (const p of portfolios) {
+    const keep = [];
+    for (const h of p.holdings) {
+      if (!isPlaceholder(h.symbol)) { keep.push(h); continue; }
+      const r = RESOLVED[h.symbol];
+      if (r?.symbol) {
+        const sym = r.symbol, ex = keep.find(x => x.symbol === sym) || p.holdings.find(x => x !== h && x.symbol === sym && !isPlaceholder(x.symbol));
+        if (h.raw) aliases[h.raw.toUpperCase()] = sym;
+        if (ex) { ex.avg = (ex.avg * ex.qty + h.avg * h.qty) / (ex.qty + h.qty); ex.qty += h.qty; } else keep.push({ ...h, symbol: sym, found: r.exchange });
+        changed = true;
+      } else if (r?.status === 'notfound') {
+        (p.pending = p.pending || []).push({ raw: h.raw || h.symbol.slice(6), qty: h.qty, avg: h.avg, why: "couldn't be found on NSE or BSE automatically: type its NSE symbol or 6-digit BSE code" });
+        changed = true;
+      } else keep.push(h);
+    }
+    p.holdings = keep;
+  }
+  if (changed) { LS.set('aliases', aliases); savePf(); }
+  return changed;
+}
+// save the portfolio and start a short fetch so the engine finds and analyses the new stocks
+async function autoLookup() {
+  if (!cloudReady()) { toast('To look these stocks up automatically, set up GitHub and your passphrase in Settings, then press Save to cloud.', 9000); return; }
+  if (await cloudSave(true)) dispatch('portfolio');
 }
 function pendingHtml(p) {
   const list = p.pending || [];
   if (!list.length) return '';
   return `<div class="banner"><b>${list.length} row${list.length > 1 ? 's' : ''} from your file not loaded yet.</b> Fill in what is missing (symbols are remembered for the next upload), then press Add. Rows left blank stay here until you dismiss them.
     <div style="display:flex;flex-direction:column;gap:6px;margin-top:10px">${list.map((r, i) => `<div class="row" style="align-items:center"><span style="flex:1 1 220px">${esc(r.raw)} · ${r.qty ? n(r.qty, f0) : '?'} @ ₹${r.avg ? n(r.avg) : '?'}<div class="hint">${esc(r.why)}</div></span>
-      <input data-sym="${i}" list="symlist" placeholder="NSE symbol" value="${esc(matchSymbol(r.raw) || '')}" style="flex:0 1 140px" aria-label="Symbol for ${esc(r.raw)}">
+      <input data-sym="${i}" list="symlist" placeholder="NSE symbol or BSE code" value="${esc(matchSymbol(r.raw) || '')}" style="flex:0 1 140px" aria-label="Symbol for ${esc(r.raw)}">
       <input data-qty="${i}" type="number" min="0" step="any" placeholder="Qty" value="${r.qty || ''}" style="flex:0 1 90px" aria-label="Quantity for ${esc(r.raw)}">
       <input data-avg="${i}" type="number" min="0" step="any" placeholder="Avg ₹" value="${r.avg || ''}" style="flex:0 1 100px" aria-label="Average price for ${esc(r.raw)}"></div>`).join('')}</div>
     <div class="tools" style="margin-top:10px"><button class="btn" id="mapok">Add these</button><button class="btn ghost" id="mapdrop">Dismiss the rest</button></div></div>`;
@@ -1020,7 +1070,7 @@ function wirePending(p) {
   $('#mapok').addEventListener('click', () => {
     const keep = [];
     (p.pending || []).forEach((r, i) => {
-      const sym = (box.querySelector(`[data-sym="${i}"]`)?.value || '').trim().toUpperCase(), qty = +box.querySelector(`[data-qty="${i}"]`)?.value, avg = +box.querySelector(`[data-avg="${i}"]`)?.value;
+      const sym = normSym(box.querySelector(`[data-sym="${i}"]`)?.value || ''), qty = +box.querySelector(`[data-qty="${i}"]`)?.value, avg = +box.querySelector(`[data-avg="${i}"]`)?.value;
       if (!sym || !(qty > 0) || !(avg > 0)) { keep.push(r); return; }
       if (sym !== r.raw.toUpperCase()) aliases[r.raw.toUpperCase()] = sym;
       const ex = p.holdings.find(h => h.symbol === sym);

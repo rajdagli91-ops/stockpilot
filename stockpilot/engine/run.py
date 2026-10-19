@@ -29,6 +29,7 @@ from engine.providers import nse_files, screener
 from engine.providers import global_mkts
 from engine.providers import news as news_p
 from engine.providers import commodity
+from engine.providers import resolve as resolver
 from engine.providers import yahoo
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -406,12 +407,29 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     # ---- who to track: watchlist + your (encrypted) portfolios
     portfolios = load_portfolios()
     track = {r["symbol"].strip().upper(): r for r in universe.tracked()}
+    # holdings the website could not recognise ("?ISIN:..." / "?NAME:..."): find them on NSE, else BSE
+    resolved = jload(OUT / "resolved.json", {})
+    pending = [{"key": h["symbol"], "raw": h.get("raw") or h["symbol"][6:], "isin": h.get("isin")}
+               for p in portfolios for h in p.get("holdings", []) if str(h.get("symbol", "")).startswith("?")]
+    if pending and not sample:
+        try:
+            resolved = resolver.resolve_all(pending, resolved)
+            jsave(OUT / "resolved.json", resolved, compact=False)
+        except Exception:
+            traceback.print_exc()
     for p in portfolios:
         for h in p.get("holdings", []):
-            track.setdefault(h["symbol"].upper(), {"symbol": h["symbol"], "name": h.get("raw") or h["symbol"]})
+            sym = h["symbol"]
+            if sym.startswith("?"):
+                sym = (resolved.get(sym) or {}).get("symbol")
+                if not sym:
+                    continue
+            track.setdefault(sym.upper(), {"symbol": sym, "name": h.get("raw") or sym})
     print(f"tracking {len(track)} stocks from watchlist + {len(portfolios)} portfolios")
 
     nse = universe.nse_list() if mode == "full" else []
+    if nse:  # lets the website match broker files by ISIN
+        jsave(OUT / "isin.json", {i: s_ for s_, _, i in nse if i})
     nse_isin = {s: i for s, _, i in nse} if nse else {r["symbol"]: "" for r in rows.values() if r.get("exchange") != "BSE"}
     events, code_of = exchange_events(mode, nse_isin, bsep, rows) if mode in ("full", "quick") else ([], jload(OUT / "bse_codes.json", {}))
     for sym, r in track.items():
