@@ -36,6 +36,8 @@ def _action(row, weight, detail=None, min_entry=55):
         return "HOLD (add on dip)" if e is not None and e < min_entry else "ADD MORE"
     if er is not None and er < 12:
         return "HOLD / REVIEW"
+    if broken and hs is not None and hs < 50:
+        return "HOLD (watch)"
     return "HOLD"
 
 

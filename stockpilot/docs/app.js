@@ -73,6 +73,7 @@ function holdCall(s, w = 0) {
     return e != null && e < (META.scan?.min_entry_score ?? 55) ? 'HOLD (add on dip)' : 'ADD MORE';
   }
   if (s.expected_return != null && s.expected_return < 12) return 'HOLD / REVIEW';
+  if (h?.broken && hs < 50) return 'HOLD (watch)';  // keep, but the price trend has broken
   return 'HOLD';
 }
 let _held = null, _heldKey = '';
@@ -536,6 +537,7 @@ function actionReasons(r) {
   else if (A === 'HOLD (add on dip)') out.push(`Rated BUY and there is room to add (${w.toFixed(1)}% of the portfolio), but the entry checklist says wait for a better price.`);
   else if (A === 'HOLD / REVIEW') out.push('Not a sell, but its expected return is below 12%/yr; review it at the next quarterly result.');
   else if (A === 'HOLD') out.push('Not strong enough to add to, not weak enough to sell.');
+  else if (A === 'HOLD (watch)') out.push(`The business is fine to keep, but the price trend has broken (hold score ${h?.score}). Don't add now; if the hold score drops below 35 the call becomes CONSIDER EXIT.`);
   else if (A === 'SHORT-TERM TRADE') out.push('Rated BUY for a short-term move only; set the stop-loss shown on its page.');
   if (g != null) out.push(`You are ${g >= 0 ? 'up' : 'down'} ${Math.abs(g).toFixed(0)}% on this holding${g < -25 && r.action.startsWith('EXIT') ? '. The loss is already taken; the question is only where the money grows best from here' : ''}.`);
   if (s.horizon?.note) out.push(s.horizon.note);
@@ -1132,7 +1134,7 @@ async function renderReports() {
       ${r.portfolios.filter(p => { const cur = portfolios.find(x => x.id === activePf); return cur && ((p.id && p.id === cur.id) || (!p.id && p.name === cur.name)); }).map(p => `<div class="rep"><h3>${esc(p.name)}</h3>
         <p class="hint">${inr(p.value)} · ${pc(p.gain_pct)} on cost · health ${p.health ?? '—'}/100 · expected ${pc(p.expected_return)}/yr${p.gap < 0 ? ` (${Math.abs(p.gap).toFixed(1)} pts short of ${target()}%)` : ''}</p>
         ${p.changes.length ? `<p class="hint"><b>Changed:</b> ${p.changes.map(c => `${esc(c.symbol)} ${esc(c.from)} → ${esc(c.to)}`).join(', ')}</p>` : ''}
-        ${[...new Set(['EXIT', 'EXIT (no rush)', 'CONSIDER EXIT', 'BOOK PART PROFIT', 'ADD MORE', 'BUY MORE', 'SHORT-TERM TRADE', 'HOLD (add on dip)', 'HOLD / REVIEW', 'HOLD', 'HOLD (already large)', 'NOT ANALYSED', ...p.holdings.map(h => h.action)])].map(a => { const hs = p.holdings.filter(h => h.action === a); const pos = a === 'ADD MORE' || a === 'BUY MORE'; return hs.length ? `<div class="repgrp"><div>${pill(a)} <span class="hint">${hs.length}</span></div><ul>${hs.map(h => `<li><a href="#stock/${encodeURIComponent(h.symbol)}">${esc(h.symbol.replace(/\.BO$/, ''))}</a> <span class="muted">${h.weight.toFixed(1)}% · score ${h.score ?? '—'}${h.hold != null ? ' · hold ' + h.hold : ''}${h.horizon ? ' · ' + esc(h.horizon + ' (' + h.period + ')') : ''}</span>${(pos ? h.for : h.against).length ? ' — ' + esc((pos ? h.for : h.against).slice(0, 2).join('; ')) : ''}</li>`).join('')}</ul></div>` : ''; }).join('')}
+        ${[...new Set(['EXIT', 'EXIT (no rush)', 'CONSIDER EXIT', 'BOOK PART PROFIT', 'ADD MORE', 'BUY MORE', 'SHORT-TERM TRADE', 'HOLD (add on dip)', 'HOLD / REVIEW', 'HOLD (watch)', 'HOLD', 'HOLD (already large)', 'NOT ANALYSED', ...p.holdings.map(h => h.action)])].map(a => { const hs = p.holdings.filter(h => h.action === a); const pos = a === 'ADD MORE' || a === 'BUY MORE'; return hs.length ? `<div class="repgrp"><div>${pill(a)} <span class="hint">${hs.length}</span></div><ul>${hs.map(h => `<li><a href="#stock/${encodeURIComponent(h.symbol)}">${esc(h.symbol.replace(/\.BO$/, ''))}</a> <span class="muted">${h.weight.toFixed(1)}% · score ${h.score ?? '—'}${h.hold != null ? ' · hold ' + h.hold : ''}${h.horizon ? ' · ' + esc(h.horizon + ' (' + h.period + ')') : ''}</span>${(pos ? h.for : h.against).length ? ' — ' + esc((pos ? h.for : h.against).slice(0, 2).join('; ')) : ''}</li>`).join('')}</ul></div>` : ''; }).join('')}
         ${p.alerts.length ? `<ul class="acts">${p.alerts.map(x => `<li class="warn"><span class="dot"></span><div>${esc(x)}</div></li>`).join('')}</ul>` : ''}</div>`).join('')}`;
     box.querySelectorAll('[data-i]').forEach(b => b.addEventListener('click', () => { sel = +b.dataset.i; draw(); }));
     $('#reppdf')?.addEventListener('click', async e => {
@@ -1169,7 +1171,7 @@ async function reportPdf(r, p) {
   if (p.changes?.length) { doc.setFont('helvetica', 'bold'); doc.text('Calls changed since the last report', M, y); doc.setFont('helvetica', 'normal');
     doc.autoTable({ startY: y + 6, head: [['Stock', 'Was', 'Now']], body: p.changes.map(c => [t(c.symbol.replace(/\.BO$/, '')), t(c.from), t(c.to)]), styles: { fontSize: 9 }, headStyles: { fillColor: [40, 40, 40] }, margin: { left: M, right: M } });
     y = doc.lastAutoTable.finalY + 14; }
-  const order = ['EXIT', 'EXIT (no rush)', 'CONSIDER EXIT', 'BOOK PART PROFIT', 'ADD MORE', 'BUY MORE', 'SHORT-TERM TRADE', 'HOLD (add on dip)', 'HOLD / REVIEW', 'HOLD', 'HOLD (already large)', 'NOT ANALYSED'];
+  const order = ['EXIT', 'EXIT (no rush)', 'CONSIDER EXIT', 'BOOK PART PROFIT', 'ADD MORE', 'BUY MORE', 'SHORT-TERM TRADE', 'HOLD (add on dip)', 'HOLD / REVIEW', 'HOLD (watch)', 'HOLD', 'HOLD (already large)', 'NOT ANALYSED'];
   const rank = a => { const i = order.indexOf(a); return i < 0 ? 99 : i; };
   const hs = [...p.holdings].sort((a, b) => rank(a.action) - rank(b.action) || b.weight - a.weight);
   doc.setFont('helvetica', 'bold'); doc.text('Holdings and calls', M, y); doc.setFont('helvetica', 'normal');
