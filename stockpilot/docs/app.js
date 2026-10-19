@@ -1124,6 +1124,7 @@ async function renderReports() {
     const r = reps[sel];
     box.className = '';
     box.innerHTML = `<div class="tabs" style="margin-bottom:12px">${reps.map((x, i) => `<button data-i="${i}" class="${i === sel ? 'on' : ''}">${esc(x.slot)} · ${esc(x.time.slice(5, 16))}</button>`).join('')}</div>
+      <div class="tools" style="margin:-4px 0 10px"><button class="btn ghost small" id="reppdf">Download PDF</button></div>
       ${r.market?.mood != null ? `<p class="hint">Global mood ${r.market.mood}/100 (${esc(r.market.bias)}) · ${esc(r.market.movers.map(m => m.label + ' ' + pc(m.chg_1d)).join(' · '))}</p>` : ''}
       ${(r.ipos || []).length ? `<p class="hint">IPOs: ${r.ipos.map(x => `${esc(x.name)} ${pill(x.call)}`).join(' ')}</p>` : ''}
       ${(() => { const cur = portfolios.find(x => x.id === activePf); const mine = r.portfolios.filter(p => (p.id && cur && p.id === cur.id) || (!p.id && cur && p.name === cur.name)); return mine.length ? '' : `<p class="muted">This report has no section for "${esc(cur?.name || '')}". It covers the portfolios that were saved to the cloud before ${esc(r.time.slice(11, 16))}; save this one to the cloud and it appears from the next report.</p>`; })()}
@@ -1133,8 +1134,60 @@ async function renderReports() {
         ${[...new Set(['EXIT', 'EXIT (no rush)', 'CONSIDER EXIT', 'BOOK PART PROFIT', 'ADD MORE', 'BUY MORE', 'SHORT-TERM TRADE', 'HOLD (add on dip)', 'HOLD / REVIEW', 'HOLD', 'HOLD (already large)', 'NOT ANALYSED', ...p.holdings.map(h => h.action)])].map(a => { const hs = p.holdings.filter(h => h.action === a); const pos = a === 'ADD MORE' || a === 'BUY MORE'; return hs.length ? `<div class="repgrp"><div>${pill(a)} <span class="hint">${hs.length}</span></div><ul>${hs.map(h => `<li><a href="#stock/${encodeURIComponent(h.symbol)}">${esc(h.symbol.replace(/\.BO$/, ''))}</a> <span class="muted">${h.weight.toFixed(1)}% · score ${h.score ?? '—'}${h.hold != null ? ' · hold ' + h.hold : ''}${h.horizon ? ' · ' + esc(h.horizon + ' (' + h.period + ')') : ''}</span>${(pos ? h.for : h.against).length ? ' — ' + esc((pos ? h.for : h.against).slice(0, 2).join('; ')) : ''}</li>`).join('')}</ul></div>` : ''; }).join('')}
         ${p.alerts.length ? `<ul class="acts">${p.alerts.map(x => `<li class="warn"><span class="dot"></span><div>${esc(x)}</div></li>`).join('')}</ul>` : ''}</div>`).join('')}`;
     box.querySelectorAll('[data-i]').forEach(b => b.addEventListener('click', () => { sel = +b.dataset.i; draw(); }));
+    $('#reppdf')?.addEventListener('click', async e => {
+      const btn = e.currentTarget, cur = portfolios.find(x => x.id === activePf);
+      const p = r.portfolios.find(x => (x.id && cur && x.id === cur.id) || (!x.id && cur && x.name === cur.name));
+      if (!p) { toast('This report has no section for the selected portfolio.'); return; }
+      btn.disabled = true; btn.textContent = 'Making PDF…';
+      try { await reportPdf(r, p); } catch (err) { toast('PDF failed: ' + err.message); }
+      btn.disabled = false; btn.textContent = 'Download PDF';
+    });
   };
   draw();
+}
+// ---- PDF of one portfolio's report (real text and tables, so it stays small and searchable)
+function loadScript(src) { return new Promise((ok, bad) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => bad(new Error('could not load the PDF maker; check your connection')); document.head.appendChild(s); }); }
+async function reportPdf(r, p) {
+  if (!window.jspdf) await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+  if (!window.jspdf?.jsPDF?.API?.autoTable) await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js');
+  const { jsPDF } = window.jspdf, doc = new jsPDF({ unit: 'pt', format: 'a4' });
+  // the built-in PDF fonts have no rupee sign or arrows, so use Rs / ->
+  const t = x => String(x ?? '').replace(/₹/g, 'Rs ').replace(/→/g, '->').replace(/[–—]/g, '-').replace(/[^\x20-\x7E]/g, '');
+  const rs = v => v == null ? '-' : 'Rs ' + Math.round(v).toLocaleString('en-IN');
+  const pct = (v, d = 1) => v == null ? '-' : (v >= 0 ? '+' : '') + v.toFixed(d) + '%';
+  const W = doc.internal.pageSize.getWidth(), M = 40; let y = 48;
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(18); doc.text('StockPilot report', M, y);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(100);
+  doc.text(t(`${p.name}  |  ${r.slot}  |  ${r.time}`), M, y += 18);
+  doc.setTextColor(0); doc.setFontSize(11);
+  const summary = [['Value', rs(p.value)], ['Invested', rs(p.invested)], ['Gain on cost', pct(p.gain_pct)], ['Health score', p.health != null ? p.health + ' / 100' : '-'],
+    ['Expected return', pct(p.expected_return) + ' a year' + (p.gap != null ? (p.gap < 0 ? ` (${Math.abs(p.gap).toFixed(1)} pts short of ${target()}% target)` : ` (meets ${target()}% target)`) : '')]];
+  if (r.market?.mood != null) summary.push(['Global mood', t(`${r.market.mood}/100 (${r.market.bias})  ` + (r.market.movers || []).map(m => `${m.label} ${pct(m.chg_1d)}`).join(', '))]);
+  doc.autoTable({ startY: y + 10, body: summary, theme: 'plain', styles: { fontSize: 10, cellPadding: 3 }, columnStyles: { 0: { fontStyle: 'bold', cellWidth: 110 } }, margin: { left: M, right: M } });
+  y = doc.lastAutoTable.finalY + 14;
+  if (p.changes?.length) { doc.setFont('helvetica', 'bold'); doc.text('Calls changed since the last report', M, y); doc.setFont('helvetica', 'normal');
+    doc.autoTable({ startY: y + 6, head: [['Stock', 'Was', 'Now']], body: p.changes.map(c => [t(c.symbol.replace(/\.BO$/, '')), t(c.from), t(c.to)]), styles: { fontSize: 9 }, headStyles: { fillColor: [40, 40, 40] }, margin: { left: M, right: M } });
+    y = doc.lastAutoTable.finalY + 14; }
+  const order = ['EXIT', 'EXIT (no rush)', 'CONSIDER EXIT', 'BOOK PART PROFIT', 'ADD MORE', 'BUY MORE', 'SHORT-TERM TRADE', 'HOLD (add on dip)', 'HOLD / REVIEW', 'HOLD', 'HOLD (already large)', 'NOT ANALYSED'];
+  const rank = a => { const i = order.indexOf(a); return i < 0 ? 99 : i; };
+  const hs = [...p.holdings].sort((a, b) => rank(a.action) - rank(b.action) || b.weight - a.weight);
+  doc.setFont('helvetica', 'bold'); doc.text('Holdings and calls', M, y); doc.setFont('helvetica', 'normal');
+  const colour = a => /EXIT/.test(a) ? [176, 42, 42] : /ADD|BUY/.test(a) ? [26, 120, 70] : /BOOK|REVIEW/.test(a) ? [160, 110, 0] : [60, 60, 60];
+  doc.autoTable({ startY: y + 6, head: [['Stock', 'Call', 'Weight', 'Value', 'Gain', 'Score', 'Hold', 'Main reason']],
+    body: hs.map(h => { const pos = /ADD|BUY/.test(h.action); return [t(h.symbol.replace(/\.BO$/, ' (BSE)')), t(h.action), h.weight.toFixed(1) + '%', rs(h.value), pct(h.gain_pct, 0), h.score != null ? Math.round(h.score) : '-', h.hold ?? '-', t(((pos ? h.for : h.against) || []).slice(0, 2).join('; ') || h.horizon_note || '')]; }),
+    styles: { fontSize: 8, cellPadding: 3, valign: 'top' }, headStyles: { fillColor: [40, 40, 40] },
+    columnStyles: { 0: { cellWidth: 62, fontStyle: 'bold' }, 1: { cellWidth: 70 }, 2: { cellWidth: 38, halign: 'right' }, 3: { cellWidth: 62, halign: 'right' }, 4: { cellWidth: 38, halign: 'right' }, 5: { cellWidth: 30, halign: 'right' }, 6: { cellWidth: 28, halign: 'right' } },
+    didParseCell: d => { if (d.section === 'body' && d.column.index === 1) { d.cell.styles.textColor = colour(d.cell.raw); d.cell.styles.fontStyle = 'bold'; } if (d.section === 'head' && d.column.index >= 2 && d.column.index <= 6) d.cell.styles.halign = 'right'; },
+    margin: { left: M, right: M } });
+  y = doc.lastAutoTable.finalY + 14;
+  if (p.alerts?.length) { if (y > 760) { doc.addPage(); y = 48; } doc.setFont('helvetica', 'bold'); doc.text('Portfolio alerts', M, y); doc.setFont('helvetica', 'normal'); doc.setFontSize(9);
+    p.alerts.forEach(a => { const lines = doc.splitTextToSize('- ' + t(a), W - 2 * M); if (y + 12 * lines.length > 800) { doc.addPage(); y = 48; } doc.text(lines, M, y += 14); y += 12 * (lines.length - 1); }); }
+  const pages = doc.getNumberOfPages();
+  for (let i = 1; i <= pages; i++) { doc.setPage(i); doc.setFontSize(8); doc.setTextColor(120);
+    doc.text(t('Rule-based signals from StockPilot, not investment advice.'), M, 812);
+    doc.text(t('Score = overall model score (0-100). Hold = hold score (0-100, higher = keep holding).'), M, 823);
+    doc.text(`Page ${i} of ${pages}`, W - M, 823, { align: 'right' }); }
+  doc.save(t(`StockPilot ${p.name} ${r.slot} ${r.time.slice(0, 16)}`).replace(/[^A-Za-z0-9 _-]+/g, '').replace(/\s+/g, '_') + '.pdf');
 }
 
 // ================================================================ view: global market + exchange events
