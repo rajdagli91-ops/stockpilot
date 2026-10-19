@@ -28,6 +28,7 @@ from engine.providers import bse as bse_p
 from engine.providers import nse_files, screener
 from engine.providers import global_mkts
 from engine.providers import news as news_p
+from engine.providers import commodity
 from engine.providers import yahoo
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -367,6 +368,12 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     try:
         market = global_mkts.fetch(prov)
         market["updated"] = dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
+        try:
+            fx = next((m["last"] for m in market.get("markets", []) if m["key"] == "usdinr"), None)
+            market["crude"] = commodity.fetch_crude(prov, fx)
+            print(f"crude: {(market['crude'] or {}).get('verdict')}")
+        except Exception as e:
+            print(f"crude outlook skipped: {e}")
         jsave(OUT / "market.json", market, compact=False)
         print(f"global mood {market.get('mood')} ({market.get('bias')})")
     except Exception as e:

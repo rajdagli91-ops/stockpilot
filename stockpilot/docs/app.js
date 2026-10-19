@@ -1054,8 +1054,45 @@ async function renderReports() {
 }
 
 // ================================================================ view: global market + exchange events
+// what each number is, and the rupee value for dollar-priced commodities
+const MKT_UNIT = { sp500: 'pts · US', nasdaq: 'pts · US', dow: 'pts · US', us_vix: 'index', us10y: '% yield', dxy: 'index', usdinr: '₹ per US$', nikkei: 'pts · Japan (¥)', hangseng: 'pts · Hong Kong (HK$)', kospi: 'pts · Korea (₩)', shanghai: 'pts · China (¥)', ftse: 'pts · UK (£)', dax: 'pts · Germany (€)', brent: 'US$ per barrel', gold: 'US$ per troy ounce', copper: 'US$ per pound', nifty: 'pts · India (₹)', india_vix: 'index' };
+function mktLast(m, fx) {
+  const u = m.unit || MKT_UNIT[m.key] || '';
+  if (m.last == null) return '—';
+  if (/^US\$/.test(u)) {
+    const inr = !fx ? '' : m.key === 'gold' ? `≈ ₹${n(m.last * fx / 31.1035 * 10, f0)} per 10 g` : m.key === 'copper' ? `≈ ₹${n(m.last * fx * 2.20462, f0)} per kg` : m.key === 'brent' ? `≈ ₹${n(m.last * fx, f0)} per barrel` : '';
+    return `$${n(m.last)}<div class="hint">${esc(u)}${inr ? '<br>' + inr : ''}</div>`;
+  }
+  if (m.key === 'usdinr') return `₹${n(m.last)}<div class="hint">${esc(u)}</div>`;
+  if (m.key === 'us10y') return `${n(m.last)}%<div class="hint">${esc(u)}</div>`;
+  return `${n(m.last)}<div class="hint">${esc(u)}</div>`;
+}
+function crudeHtml(c) {
+  if (!c) return '';
+  const p1 = c.prob?.['1m'], p3 = c.prob?.['3m'];
+  const probRow = (lbl, p) => !p ? '' : `<div class="prob"><div class="pl">${lbl}</div><div class="pbar" role="img" aria-label="${p.up}% up, ${100 - p.up}% down"><i class="up" style="width:${p.up}%">${p.up}% up</i><i class="dn" style="width:${100 - p.up}%">${100 - p.up}% down</i></div>
+    <div class="hint">Typical move ${p.median >= 0 ? '+' : ''}${p.median}% · from ${f0.format(p.n)} similar days (${esc(p.matched)}) · any day: ${p.base_up}% up</div></div>`;
+  const ch = c.chg || {};
+  const tone = t => `<span class="tone" style="background:${t > 0 ? 'var(--buy)' : t < 0 ? 'var(--sell)' : 'var(--nodata)'}"></span>`;
+  return `<div class="card crude"><div class="cardhead"><h2>Crude oil (Brent): trend and outlook</h2><span class="hint">Prices to ${esc(c.date)} · updated with each run</span></div>
+    <div class="crudetop">
+      <div><div class="big mono">$${n(c.last)}</div><div class="hint">${esc(c.unit)}${c.last_inr ? ` · ≈ ₹${n(c.last_inr, f0)} per barrel at ₹${n(c.usdinr)}/$` : ''}</div>
+        <div class="chgs">${[['1 week', ch['1w']], ['1 month', ch['1m']], ['3 months', ch['3m']], ['1 year', ch['1y']]].map(([l, v]) => `<span>${l} <b class="${v >= 0 ? 'pos' : 'neg'}">${pc(v, 1)}</b></span>`).join('')}</div></div>
+      <div style="flex:1 1 320px"><div class="sig"><b>${esc(c.verdict)}</b></div>${probRow('Next 1 month', p1)}${probRow('Next 3 months', p3)}
+        <div class="hint">Likely range next month (about 2 in 3 chance): $${n(c.range_1m[0])}–$${n(c.range_1m[1])}${c.range_1m_inr?.[0] ? ` · ≈ ₹${n(c.range_1m_inr[0], f0)}–₹${n(c.range_1m_inr[1], f0)} per barrel` : ''}</div></div>
+    </div>
+    <div class="grid2" style="margin-top:12px">
+      <div><div class="ph">Trend</div><ul>${c.why.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+        <div class="hint">50-day avg $${n(c.dma50)} · 200-day avg $${n(c.dma200)} · 52-week $${n(c.lo52)}–$${n(c.hi52)}</div>
+        <div class="ph" style="margin-top:10px">What it means for Indian stocks</div><ul>${c.impact.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>
+      <div><div class="ph">News this week: ${esc(c.news_tone)} <span class="hint">(${c.news_pos} pointing up, ${c.news_neg} down, ${c.news.length - c.news_pos - c.news_neg} neutral)</span></div>
+        <div class="news"><ul>${c.news.map(x => `<li>${tone(x.tone)}<span class="d">${esc(newsAge(x.date))}</span> <a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a></li>`).join('') || '<li class="muted">No oil news found this week.</li>'}</ul></div></div>
+    </div>
+    <p class="hint">How the odds are worked out: over the last ${c.years} years of Brent prices, on days set up like today (same trend and momentum), how often was the price higher a month or three months later. It's a historical base rate, not a forecast: wars, OPEC decisions and recessions move oil in ways no chart predicts. Green/red dots on headlines are a keyword reading of what each implies for the price.</p></div>`;
+}
 function viewMarket() {
   const v = $('#view');
+  const fx = (MARKET.markets || []).find(m => m.key === 'usdinr')?.last;
   const groups = {}; (MARKET.markets || []).forEach(m => (groups[m.group] = groups[m.group] || []).push(m));
   const tilts = Object.entries(MARKET.tilts || {}).sort((a, b) => b[1].score - a[1].score);
   const evIcon = t => ({ volume: 'Volume spike', news: 'Major news', red_flag: 'Red flag' }[t] || t);
@@ -1063,10 +1100,11 @@ function viewMarket() {
     <div><h1>Global markets</h1><p class="sub">How world markets are set up for India's next session. Updated ${esc(MARKET.updated || '—')}.</p></div>
     <div class="card verdict"><div class="big" style="color:${scoreColor(MARKET.mood)}">${MARKET.mood ?? '—'}</div>
       <div><div class="sig">${esc(MARKET.bias || 'No data')}</div><div class="hint">Global mood, 0–100. Overnight US and Asian markets, fear indices, crude, dollar, yields and the rupee.</div></div></div>
+    ${crudeHtml(MARKET.crude)}
     <div class="grid2">
       <div class="card"><h2>Markets</h2><div class="tbox" style="margin-top:12px;border:0"><table><thead><tr><th>Market</th><th class="num">Last</th><th class="num">1 day</th><th class="num">5 days</th></tr></thead><tbody>
-        ${Object.entries(groups).map(([g, ms]) => `<tr><td colspan="4" class="grp">${esc(g)}</td></tr>` + ms.map(m => `<tr><td>${esc(m.label)}</td><td class="num">${n(m.last)}</td><td class="num ${m.chg_1d >= 0 ? 'pos' : 'neg'}">${pc(m.chg_1d, 2)}</td><td class="num ${m.chg_5d >= 0 ? 'pos' : 'neg'}">${pc(m.chg_5d, 1)}</td></tr>`).join('')).join('')}
-      </tbody></table></div><p class="hint">Rising VIX, yields, dollar, crude or USD/INR are read as negative for Indian stocks.</p></div>
+        ${Object.entries(groups).map(([g, ms]) => `<tr><td colspan="4" class="grp">${esc(g)}</td></tr>` + ms.map(m => `<tr><td>${esc(m.label)}</td><td class="num">${mktLast(m, fx)}</td><td class="num ${m.chg_1d >= 0 ? 'pos' : 'neg'}">${pc(m.chg_1d, 2)}</td><td class="num ${m.chg_5d >= 0 ? 'pos' : 'neg'}">${pc(m.chg_5d, 1)}</td></tr>`).join('')).join('')}
+      </tbody></table></div><p class="hint">"pts" = index points in that country's market. Commodity prices are international prices in US dollars; the ₹ figure is that price converted at today's ₹/$ rate, before Indian import duty and GST, so it is below the MCX or jeweller price. Rising VIX, yields, dollar, crude or USD/INR are read as negative for Indian stocks.</p></div>
       <div class="card"><h2>Effect on Indian sectors</h2><p class="sub">50 = no effect. This feeds the "Global markets" rating of every stock in the sector.</p>
         <div class="params" style="margin-top:12px">${tilts.map(([sec, t]) => `<div class="prow"><div>${esc(sec)}${t.why.length ? `<div class="hint">${esc(t.why.join('; '))}</div>` : ''}</div><div></div>${bar(t.score)}</div>`).join('') || '<p class="muted">No data yet.</p>'}</div></div>
     </div>

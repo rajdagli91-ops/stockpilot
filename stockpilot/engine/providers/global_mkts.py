@@ -9,25 +9,25 @@ import numpy as np
 
 # Yahoo symbols. GIFT Nifty is not on Yahoo, so Nifty's own pre-open gap is inferred from Asia + US.
 MARKETS = [
-    # key, yahoo, label, group
-    ("sp500", "^GSPC", "S&P 500", "US"),
-    ("nasdaq", "^IXIC", "Nasdaq", "US"),
-    ("dow", "^DJI", "Dow Jones", "US"),
-    ("us_vix", "^VIX", "US VIX (fear index)", "US"),
-    ("us10y", "^TNX", "US 10-year yield", "Rates & FX"),
-    ("dxy", "DX-Y.NYB", "Dollar index", "Rates & FX"),
-    ("usdinr", "INR=X", "USD / INR", "Rates & FX"),
-    ("nikkei", "^N225", "Nikkei 225", "Asia"),
-    ("hangseng", "^HSI", "Hang Seng", "Asia"),
-    ("kospi", "^KS11", "Kospi", "Asia"),
-    ("shanghai", "000001.SS", "Shanghai", "Asia"),
-    ("ftse", "^FTSE", "FTSE 100", "Europe"),
-    ("dax", "^GDAXI", "DAX", "Europe"),
-    ("brent", "BZ=F", "Brent crude", "Commodities"),
-    ("gold", "GC=F", "Gold", "Commodities"),
-    ("copper", "HG=F", "Copper", "Commodities"),
-    ("nifty", "^NSEI", "Nifty 50", "India"),
-    ("india_vix", "^INDIAVIX", "India VIX", "India"),
+    # key, yahoo, label, group, unit (what the number is: index points and in which market, or price and its currency)
+    ("sp500", "^GSPC", "S&P 500", "US", "pts · US"),
+    ("nasdaq", "^IXIC", "Nasdaq", "US", "pts · US"),
+    ("dow", "^DJI", "Dow Jones", "US", "pts · US"),
+    ("us_vix", "^VIX", "US VIX (fear index)", "US", "index"),
+    ("us10y", "^TNX", "US 10-year yield", "Rates & FX", "% yield"),
+    ("dxy", "DX-Y.NYB", "Dollar index", "Rates & FX", "index"),
+    ("usdinr", "INR=X", "USD / INR", "Rates & FX", "₹ per US$"),
+    ("nikkei", "^N225", "Nikkei 225", "Asia", "pts · Japan (¥)"),
+    ("hangseng", "^HSI", "Hang Seng", "Asia", "pts · Hong Kong (HK$)"),
+    ("kospi", "^KS11", "Kospi", "Asia", "pts · Korea (₩)"),
+    ("shanghai", "000001.SS", "Shanghai", "Asia", "pts · China (¥)"),
+    ("ftse", "^FTSE", "FTSE 100", "Europe", "pts · UK (£)"),
+    ("dax", "^GDAXI", "DAX", "Europe", "pts · Germany (€)"),
+    ("brent", "BZ=F", "Brent crude", "Commodities", "US$ per barrel"),
+    ("gold", "GC=F", "Gold", "Commodities", "US$ per troy ounce"),
+    ("copper", "HG=F", "Copper", "Commodities", "US$ per pound"),
+    ("nifty", "^NSEI", "Nifty 50", "India", "pts · India (₹)"),
+    ("india_vix", "^INDIAVIX", "India VIX", "India", "index"),
 ]
 
 # How a 5-day move in each driver tilts each sector (Yahoo sector names). +1 = good for the sector when the driver rises.
@@ -56,12 +56,12 @@ def fetch(prov) -> dict:
     hist = prov.bulk_history([m[1] for m in MARKETS], period="3mo") if hasattr(prov, "bulk_history") else \
         {m[1]: prov.history(m[1], period="3mo") for m in MARKETS}
     rows, ch1, ch5 = [], {}, {}
-    for key, ysym, label, group in MARKETS:
+    for key, ysym, label, group, unit in MARKETS:
         h = hist.get(ysym)
         c = h["Close"].dropna() if h is not None and len(h) else None
         d1, d5 = _chg(c, 1), _chg(c, 5)
         ch1[key], ch5[key] = d1, d5
-        rows.append({"key": key, "label": label, "group": group, "last": round(float(c.iloc[-1]), 2) if c is not None and len(c) else None,
+        rows.append({"key": key, "label": label, "group": group, "unit": unit, "last": round(float(c.iloc[-1]), 2) if c is not None and len(c) else None,
                      "chg_1d": None if d1 is None else round(d1, 2), "chg_5d": None if d5 is None else round(d5, 2),
                      "date": c.index[-1].strftime("%Y-%m-%d") if c is not None and len(c) else None})
 
