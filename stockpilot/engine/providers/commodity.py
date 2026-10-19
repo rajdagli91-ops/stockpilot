@@ -9,30 +9,25 @@ from urllib.parse import quote_plus
 
 import numpy as np
 
-# oil-specific news words: what each headline implies for the PRICE
-BULL = ["opec cut", "output cut", "production cut", "cuts output", "supply cut", "supply disruption", "disruption",
-        "sanction", "sanctions", "attack", "strike on", "tensions", "conflict", "war", "blockade", "outage", "draw",
-        "inventories fall", "stocks fall", "stockpiles fall", "inventory draw", "tight supply", "supply shortfall",
-        "demand rises", "demand growth", "rally", "rallies", "surge", "surges", "jumps", "rises", "climbs", "gains",
-        "highest", "hurricane", "stimulus"]
-BEAR = ["output hike", "production hike", "raise output", "raises output", "boost output", "increase production",
-        "supply increase", "build", "inventories rise", "stocks rise", "stockpiles rise", "inventory build", "glut",
-        "surplus", "oversupply", "demand concerns", "weak demand", "demand slows", "slowdown", "recession", "ceasefire",
-        "peace deal", "truce", "falls", "slides", "slumps", "drops", "tumbles", "plunges", "lowest", "sinks", "declines",
-        "tariff", "strong dollar"]
-_B = [re.compile(r"\b" + re.escape(w) + r"\b") for w in BULL]
-_S = [re.compile(r"\b" + re.escape(w) + r"\b") for w in BEAR]
+# oil-specific news reading: what each headline implies for the PRICE.
+# Headlines often say where the price came from ("dips after hitting a 5-month high"); only the part before
+# "after / from / despite / as / amid" says which way it is moving now, so the rest is ignored for direction.
+UP_MOVE = r"\b(rise|rises|rising|rose|gain|gains|gained|jump|jumps|jumped|surge|surges|surged|rally|rallies|rallied|climb|climbs|climbed|soar|soars|spike|spikes|firm|firms|up \d|higher|hits? (a )?\d+-(month|year|week) high)\b"
+DOWN_MOVE = r"\b(fall|falls|falling|fell|dip|dips|dipped|ease|eases|eased|easing|slip|slips|slipped|retreat|retreats|retreated|decline|declines|declined|drop|drops|dropped|slide|slides|slid|slump|slumps|tumble|tumbles|plunge|plunges|sink|sinks|sank|lower|down \d|weaken|weakens)\b"
+BULL_DRIVER = r"\b(opec\+? (cut|cuts)|output cut|production cut|supply cut|disruption|outage|attack|attacks|strike on|escalat\w*|blockade|new sanctions|sanctions on|tighten\w* sanctions|inventor(y|ies) (fall|falls|draw)|stockpiles? (fall|falls)|draw(down)?|supply shortfall|tight supply|hurricane)\b"
+BEAR_DRIVER = r"\b(output (hike|increase)|production (hike|increase)|raise[sd]? output|boost\w* output|glut|surplus|oversupply|inventor(y|ies) (rise|rises|build)|stockpiles? (rise|rises)|build|demand (concern|worries|slow\w*)|weak demand|slowdown|recession|ceasefire|truce|peace (deal|talks)|de-?escalat\w*|waive[sd]? \w*\s?sanctions|lift\w* sanctions|ease[sd]? sanctions|sanctions (waiver|relief)|supplies recover|could ease|to ease)\b"
 
 
 def _tone(title: str) -> int:
     t = title.lower()
-    # "stocks/inventories fall" is bullish for oil even though "falls" alone is bearish
-    if re.search(r"\b(inventor(y|ies)|stockpiles?|crude stocks)\b.{0,30}\b(fall|falls|drop|drops|draw)\b", t):
-        return 1
-    if re.search(r"\b(inventor(y|ies)|stockpiles?|crude stocks)\b.{0,30}\b(rise|rises|build|builds|jump|jumps)\b", t):
-        return -1
-    b, s = sum(1 for r in _B if r.search(t)), sum(1 for r in _S if r.search(t))
-    return (b > s) - (s > b)
+    head = re.split(r"\b(after|from|despite|amid|as|on|following|since)\b", t, maxsplit=1)[0]
+    head = re.sub(r"\b(inventor(y|ies)|stockpiles?|crude stocks)\b\s+\w+", " ", head)  # "inventories fall" is not the price falling
+    score = 0
+    if re.search(DOWN_MOVE, head): score -= 1
+    elif re.search(UP_MOVE, head): score += 1
+    if re.search(BEAR_DRIVER, t): score -= 1
+    if re.search(BULL_DRIVER, t) and not re.search(r"de-?escalat", t): score += 1
+    return (score > 0) - (score < 0)
 
 
 def oil_news(days: int = 7, limit: int = 15) -> list:
