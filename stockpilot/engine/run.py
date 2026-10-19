@@ -623,7 +623,11 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
                 hist = []
         rep = rpt.build(portfolios, rows, details, picks, market, hist[0] if hist else None, ipos,
                         slot or {"full": "Full scan", "quick": "Update", "portfolio": "Portfolio fetch"}.get(mode, "Update"), S["target_cagr"])
-        hist = [rep] + hist[:14]
+        # keep only the last 2 days (today and yesterday); a manual fetch replaces the previous manual one
+        cut = (dt.datetime.now(IST).date() - dt.timedelta(days=1)).isoformat()
+        if not slot:
+            hist = [h for h in hist if h.get("slot") != rep["slot"]]
+        hist = [rep] + [h for h in hist if (h.get("time") or "")[:10] >= cut]
         jsave(OUT / "report.enc.json", secure.encrypt({"history": hist}, key))
         if slot or os.environ.get("SEND_ALWAYS") == "1":
             site = os.environ.get("SITE_URL", "")

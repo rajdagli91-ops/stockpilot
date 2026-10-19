@@ -954,7 +954,7 @@ function viewPortfolios() {
     <div class="card cloud"><div><b>Saved in this browser.</b> <span class="hint" id="cloudstate">${cloudReady() ? (LS.get('cloudSaved', 0) ? 'Cloud copy saved ' + new Date(LS.get('cloudSaved')).toLocaleString('en-IN') : 'Not saved to cloud yet') : 'Add GitHub + a passphrase in Settings to save an encrypted copy, so scheduled reports (pre-market, 1 PM, 3 PM) include your portfolios and other devices can load them.'}</span></div>
       <div class="tools"><button class="btn ghost small" id="csave">Save to cloud</button><button class="btn ghost small" id="cload">Load from cloud</button></div></div>
     <div class="card"><div class="cardhead"><h2>Today's analysis</h2><span class="hint">Data from ${esc(META.updated || '—')}</span></div>${reportHtml(p)}</div>
-    <div class="card" id="reports"><div class="cardhead"><h2>Scheduled reports: ${esc(p.name)}</h2><span class="hint">Pre-market, 1 PM and 3 PM · this portfolio only</span></div><div id="replist" class="muted">${settings.pass ? 'Loading…' : 'Set your passphrase in Settings to read reports.'}</div></div>
+    <div class="card" id="reports"><div class="cardhead"><h2>Scheduled reports: ${esc(p.name)}</h2><span class="hint">Pre-market, 1 PM and 3 PM · this portfolio only · last 2 days</span></div><div id="replist" class="muted">${settings.pass ? 'Loading…' : 'Set your passphrase in Settings to read reports.'}</div></div>
     <div class="card"><h2>Add holdings</h2>
       <div class="row" style="margin-top:12px">
         <label>Symbol<input id="hsym" list="symlist" placeholder="e.g. INFY" autocomplete="off"></label>
@@ -1115,11 +1115,15 @@ async function renderReports() {
   const reps = REPORTS || await loadReports();
   if (reps === 'badpass') { box.textContent = 'The passphrase in Settings does not match the one used by the scheduled runs (GitHub secret PORTFOLIO_KEY).'; return; }
   if (!reps?.length) { box.textContent = 'No reports yet. They appear after the first scheduled run with your cloud-saved portfolios.'; return; }
+  // last 2 days only (today and yesterday), newest first
+  const cut = new Date(Date.now() - 864e5 + 5.5 * 36e5).toISOString().slice(0, 10);
+  const recent = reps.filter(x => (x.time || '').slice(0, 10) >= cut);
+  if (recent.length) reps.splice(0, reps.length, ...recent);
   let sel = 0;
   const draw = () => {
     const r = reps[sel];
     box.className = '';
-    box.innerHTML = `<div class="tabs" style="margin-bottom:12px">${reps.slice(0, 9).map((x, i) => `<button data-i="${i}" class="${i === sel ? 'on' : ''}">${esc(x.slot)} · ${esc(x.time.slice(5, 16))}</button>`).join('')}</div>
+    box.innerHTML = `<div class="tabs" style="margin-bottom:12px">${reps.map((x, i) => `<button data-i="${i}" class="${i === sel ? 'on' : ''}">${esc(x.slot)} · ${esc(x.time.slice(5, 16))}</button>`).join('')}</div>
       ${r.market?.mood != null ? `<p class="hint">Global mood ${r.market.mood}/100 (${esc(r.market.bias)}) · ${esc(r.market.movers.map(m => m.label + ' ' + pc(m.chg_1d)).join(' · '))}</p>` : ''}
       ${(r.ipos || []).length ? `<p class="hint">IPOs: ${r.ipos.map(x => `${esc(x.name)} ${pill(x.call)}`).join(' ')}</p>` : ''}
       ${(() => { const cur = portfolios.find(x => x.id === activePf); const mine = r.portfolios.filter(p => (p.id && cur && p.id === cur.id) || (!p.id && cur && p.name === cur.name)); return mine.length ? '' : `<p class="muted">This report has no section for "${esc(cur?.name || '')}". It covers the portfolios that were saved to the cloud before ${esc(r.time.slice(11, 16))}; save this one to the cloud and it appears from the next report.</p>`; })()}
