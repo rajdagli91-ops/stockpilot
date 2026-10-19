@@ -18,6 +18,57 @@ def _words(s: str) -> set:
     return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower()) if w not in GENERIC and len(w) > 1}
 
 
+# ---- broker short names: "CONTAINER CORPN.(I)L", "HOUSING & URBAN DEVP", "TATA MOT PASS VEHI", "RELIANCE INFRASTRUEQ"
+SKIP = {"ltd", "limited", "l", "the", "of", "and", "co", "company", "eq", "be", "inc"}
+
+
+def _toks(s: str, raw: bool = False) -> list:
+    s = re.sub(r"\(i\)", " india ", (s or "").lower())
+    out = []
+    for w in re.findall(r"[a-z0-9]+", s):
+        if raw and len(w) > 5 and w.endswith("eq"):
+            w = w[:-2]  # "INFRASTRUEQ": series code glued to a truncated word
+        if w not in SKIP and not (raw and len(w) >= 3 and "limited".startswith(w)):  # "LIMITE" cut short
+            out.append(w)
+    return out
+
+
+def _abbr(t: str, w: str) -> bool:
+    """t is w shortened: a prefix (MOT -> motors) or same start + letters in order (CORPN -> corporation)."""
+    if w.startswith(t):
+        return True
+    if len(t) < 3 or t[:3] != w[:3]:
+        return False
+    it = iter(w)
+    return all(ch in it for ch in t)
+
+
+def abbrev_match(raw: str, names: list) -> str | None:
+    """names: [(symbol, company name)]. Every word of the short name must match a word of the company name, in order."""
+    rt = _toks(raw, True)
+    if not rt or (len(rt) == 1 and len(rt[0]) < 5):
+        return None
+    best, best_cov, tie = None, 0.0, False
+    for sym, name in names:
+        nt = _toks(name)
+        if not nt:
+            continue
+        i = 0
+        for w in nt:
+            if i < len(rt) and _abbr(rt[i], w):
+                i += 1
+        if i < len(rt):
+            continue
+        cov = len(rt) / len(nt)
+        if cov < 0.5:
+            continue
+        if cov > best_cov:
+            best, best_cov, tie = sym, cov, False
+        elif cov == best_cov:
+            tie = True
+    return None if tie else best
+
+
 def _search(q: str) -> list:
     for host in ("query2", "query1"):
         try:
@@ -51,8 +102,8 @@ def _pick(quotes: list, name: str | None):
             "name": best.get("longname") or best.get("shortname") or ""}
 
 
-def resolve(raw: str, isin: str | None = None) -> dict:
-    """{'symbol', 'exchange', 'name'} or {'status': 'notfound'}."""
+def resolve(raw: str, isin: str | None = None, names: list | None = None) -> dict:
+    """{'symbol', 'exchange', 'name'} or {'status': 'notfound'}. names: NSE [(symbol, name)] for short-name matching."""
     if isin and re.fullmatch(r"IN[A-Z0-9]{10}", isin.upper()):
         hit = _pick(_search(isin.upper()), None)  # an ISIN is exact: no name check needed
         if hit and hit["exchange"] == "BSE" and hit["name"]:
@@ -61,6 +112,10 @@ def resolve(raw: str, isin: str | None = None) -> dict:
                 return nse
         if hit:
             return hit
+    if names:
+        sym = abbrev_match(raw, names)
+        if sym:
+            return {"symbol": sym, "exchange": "NSE", "name": dict(names).get(sym, "")}
     q = re.sub(r"\b(ltd|limited|eq|be)\b\.?", " ", raw or "", flags=re.I).strip()
     if q:
         hit = _pick(_search(q), q)
@@ -74,16 +129,19 @@ def resolve(raw: str, isin: str | None = None) -> dict:
     return {"status": "notfound"}
 
 
-def resolve_all(items: list, cache: dict, delay: float = 0.8) -> dict:
+VERSION = 2  # bump to re-try earlier "not found" results after the matcher improves
+
+
+def resolve_all(items: list, cache: dict, delay: float = 0.8, names: list | None = None) -> dict:
     """items: [{'key', 'raw', 'isin'}]. Updates and returns cache {key: result}; 'notfound' is retried after a week."""
     import datetime as dt
     today = dt.date.today().isoformat()
     for it in items:
         c = cache.get(it["key"])
-        if c and (c.get("symbol") or (c.get("checked", "") >= (dt.date.today() - dt.timedelta(days=7)).isoformat())):
+        if c and (c.get("symbol") or (c.get("v") == VERSION and c.get("checked", "") >= (dt.date.today() - dt.timedelta(days=7)).isoformat())):
             continue
-        res = resolve(it.get("raw") or "", it.get("isin"))
-        res["checked"] = today
+        res = resolve(it.get("raw") or "", it.get("isin"), names)
+        res["checked"], res["v"] = today, VERSION
         cache[it["key"]] = res
         print(f"resolve {it['raw']!r}: {res.get('symbol') or 'not found'} {res.get('exchange') or ''}")
         time.sleep(delay)

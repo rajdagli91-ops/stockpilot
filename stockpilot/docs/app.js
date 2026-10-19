@@ -853,7 +853,35 @@ function matchSymbol(raw) {
   if (!k) return null;
   for (const r of ROWS) if (norm(r.name) === k || norm(r.symbol) === k) return r.symbol;
   const hits = ROWS.filter(r => { const nk = norm(r.name); return k.length >= 6 && nk && (nk.startsWith(k) || (k.startsWith(nk) && k.length - nk.length <= 3)); });
-  return hits.length === 1 ? hits[0].symbol : null;
+  if (hits.length === 1) return hits[0].symbol;
+  return abbrevMatch(s);
+}
+// broker short names: "CONTAINER CORPN.(I)L" -> CONCOR, "TATA MOT PASS VEHI" -> TMPV, "HOUSING & URBAN DEVP" -> HUDCO
+const ABBR_SKIP = new Set(['ltd', 'limited', 'l', 'the', 'of', 'and', 'co', 'company', 'eq', 'be', 'inc']);
+function abbrToks(str, raw = false) {
+  return (String(str || '').toLowerCase().replace(/\(i\)/g, ' india ').match(/[a-z0-9]+/g) || [])
+    .map(w => raw && w.length > 5 && w.endsWith('eq') ? w.slice(0, -2) : w)
+    .filter(w => !ABBR_SKIP.has(w) && !(raw && w.length >= 3 && 'limited'.startsWith(w)));
+}
+function abbrOk(t, w) {
+  if (w.startsWith(t)) return true;
+  if (t.length < 3 || t.slice(0, 3) !== w.slice(0, 3)) return false;
+  let i = 0; for (const ch of w) if (ch === t[i]) i++;
+  return i === t.length;
+}
+function abbrevMatch(raw) {
+  const rt = abbrToks(raw, true);
+  if (!rt.length || (rt.length === 1 && rt[0].length < 5)) return null;
+  let best = null, cov0 = 0, tie = false;
+  for (const r of ROWS) {
+    if (!r.name || String(r.symbol).endsWith('.BO')) continue;
+    const nt = abbrToks(r.name); if (!nt.length) continue;
+    let i = 0; for (const w of nt) if (i < rt.length && abbrOk(rt[i], w)) i++;
+    if (i < rt.length) continue;
+    const cov = rt.length / nt.length; if (cov < 0.5) continue;
+    if (cov > cov0) { best = r.symbol; cov0 = cov; tie = false; } else if (cov === cov0) tie = true;
+  }
+  return tie ? null : best;
 }
 function parseRows(rows) {
   const QTY = /qty|quantity|no\.? ?of shares|shares|units/i;
@@ -906,7 +934,7 @@ function viewPortfolios() {
   if (!portfolios.find(p => p.id === activePf)) activePf = portfolios[0].id;
   const p = portfolios.find(x => x.id === activePf);
   // rows an older import left as "not recognised" are now looked up automatically instead of asking you
-  const old = (p.pending || []).filter(r => /not recognised/.test(r.why || '') && r.qty > 0 && r.avg > 0);
+  const old = (p.pending || []).filter(r => /not recognised|couldn't be found/.test(r.why || '') && r.qty > 0 && r.avg > 0 && (matchSymbol(r.raw) || /not recognised/.test(r.why || '')));
   if (old.length) {
     p.pending = p.pending.filter(r => !old.includes(r));
     old.forEach(r => { const s = matchSymbol(r.raw) || '?NAME:' + r.raw.toUpperCase().replace(/\s+/g, ' ').slice(0, 60); if (!p.holdings.some(h => h.symbol === s)) p.holdings.push({ symbol: s, raw: r.raw, qty: r.qty, avg: r.avg }); });
@@ -1034,7 +1062,8 @@ function applyResolved() {
     const keep = [];
     for (const h of p.holdings) {
       if (!isPlaceholder(h.symbol)) { keep.push(h); continue; }
-      const r = RESOLVED[h.symbol];
+      const local = h.raw ? matchSymbol(h.raw) : null;
+      const r = local ? { symbol: local, exchange: 'NSE' } : RESOLVED[h.symbol];
       if (r?.symbol) {
         const sym = r.symbol, ex = keep.find(x => x.symbol === sym) || p.holdings.find(x => x !== h && x.symbol === sym && !isPlaceholder(x.symbol));
         if (h.raw) aliases[h.raw.toUpperCase()] = sym;
@@ -1288,6 +1317,10 @@ function signOut() { LS.set('auth', null); settings.pass = ''; saveSettings(); l
   document.addEventListener('click', e => { if (!e.target.closest('.fetchbox')) menu.hidden = true; });
   if (settings.pass && await settingsPull()) toast('Settings loaded from your other device.');
   if (cloudReady()) await cloudLoad();
+  document.addEventListener('visibilitychange', async () => {
+    if (document.visibilityState !== 'visible' || !cloudReady()) return;
+    if (await cloudLoad()) { toast('Loaded the latest portfolios saved from your other device.'); go(); }
+  });
   await loadData();
   go();
   pollRun();

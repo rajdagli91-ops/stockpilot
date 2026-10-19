@@ -413,7 +413,8 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
                for p in portfolios for h in p.get("holdings", []) if str(h.get("symbol", "")).startswith("?")]
     if pending and not sample:
         try:
-            resolved = resolver.resolve_all(pending, resolved)
+            names = [(r["symbol"], r.get("name") or "") for r in rows.values() if r.get("exchange") != "BSE" and r.get("name")]
+            resolved = resolver.resolve_all(pending, resolved, names=names)
             jsave(OUT / "resolved.json", resolved, compact=False)
         except Exception:
             traceback.print_exc()
