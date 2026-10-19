@@ -201,7 +201,7 @@ def build(sym, f, t, ctx=None):
 # score x (high = keep holding, low = exit pressure), its own reason xw, and a trim flag t (stretched or
 # expensive: book part profit rather than exit). Being near the 52-week high is good for a holder; the
 # results date and the entry stop-loss do not decide a hold, so they score nothing on this side.
-HOLD_CAP = {"trend": 40}   # a broken trend caps the hold score
+HOLD_CAP = {"trend": 40}   # checks that pull the hold score down when they fail (see hold_score)
 
 
 def add_exit(checks):
@@ -268,8 +268,10 @@ def hold_score(checks, enabled=None):
     if not den:
         return None, []
     s = num / den
-    for k in capped:
-        s = min(s, HOLD_CAP[k])
+    if capped:
+        # a broken trend pulls the score down but keeps the order between stocks (a hard cap made hundreds
+        # of stocks read exactly 40): 30 -> 30, 35 -> 35, 50 -> 42, 74 -> 54
+        s = min(s, 17.5 + s / 2)
     return round(s), capped
 
 
@@ -282,7 +284,8 @@ def summarize_hold(checks):
     good = sorted((c for c in checks if c.get("xst") == "good"), key=lambda c: -c["x"])
     verdict = (("Exit warning: trend broken and several factors weak" if capped else "Exit warning: several factors weak") if s < 35 else
                "Stretched or expensive: consider booking part profit" if len(trims) >= 2 and not capped else
-               ("Trend broken: watch closely" if capped else "Weakening: watch closely") if s < 50 else "Healthy: keep holding")
+               "Trend broken: the rest holds up, watch closely" if capped else
+               "Weakening: watch closely" if s < 50 else "Healthy: keep holding")
     return {"score": s, "verdict": verdict, "capped_by": capped, "trim": trims,
             "why": [c["xw"] for c in bad[:3]], "good": [c["xw"] for c in good[:3]],
             "n_good": len(good), "n_bad": len(bad), "n_ok": sum(1 for c in checks if c.get("xst") == "ok")}

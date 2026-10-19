@@ -55,7 +55,8 @@ function rescoreHold(xc, gates, trims) {
     if (trims & (1 << i)) tr.push(c.k);
   });
   if (!den) return null;
-  let sc = num / den; capped.forEach(k => { sc = Math.min(sc, HCAP()[k]); });
+  let sc = num / den;
+  if (capped.length) sc = Math.min(sc, 17.5 + sc / 2);  // broken trend: pulled down, but stocks keep their order (matches engine/entry.py)
   return { score: Math.round(sc), capped, trims: tr, broken: capped.includes('trend') };
 }
 const rowHold = r => (r && Array.isArray(r.xc) && ECHK().length) ? rescoreHold(r.xc, r.eg || 0, r.xt || 0) : null;
@@ -91,7 +92,7 @@ function holdFromDetail(e) {
   const h = rescoreHold(xc, g, t); if (!h) return null;
   const on = e.checks.filter(c => isOn(c.k));
   h.verdict = h.score < 35 ? (h.broken ? 'Exit warning: trend broken and several factors weak' : 'Exit warning: several factors weak')
-    : h.trims.length >= 2 && !h.broken ? 'Stretched or expensive: consider booking part profit' : h.score < 50 ? (h.broken ? 'Trend broken: watch closely' : 'Weakening: watch closely') : 'Healthy: keep holding';
+    : h.trims.length >= 2 && !h.broken ? 'Stretched or expensive: consider booking part profit' : h.broken ? 'Trend broken: the rest holds up, watch closely' : h.score < 50 ? 'Weakening: watch closely' : 'Healthy: keep holding';
   h.good = on.filter(c => c.xst === 'good').sort((a, b) => b.x - a.x).slice(0, 3).map(c => c.xw);
   h.why = on.filter(c => c.xst === 'bad').sort((a, b) => a.x - b.x).slice(0, 3).map(c => c.xw);
   h.checks = e.checks;
