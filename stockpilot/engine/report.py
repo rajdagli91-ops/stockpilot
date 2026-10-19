@@ -13,17 +13,27 @@ import requests
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
 
-def _action(row, weight):
+def _action(row, weight, detail=None, min_entry=55):
+    """Same call as the website's portfolio table (all entry/exit factors on)."""
     sig = (row or {}).get("signal")
     er = (row or {}).get("expected_return")
     if not row or (row.get("stage") or 0) < 2 or sig in (None, "SCAN", "NO DATA"):
         return "NOT ANALYSED"
+    hold = ((detail or {}).get("entry") or {}).get("hold") or {}
+    hs, trims, broken = hold.get("score"), hold.get("trim") or [], "trend" in (hold.get("capped_by") or [])
     if sig == "SELL":
-        return "EXIT"
+        return "EXIT (no rush)" if hs is not None and hs >= 55 and not broken else "EXIT"
+    if hs is not None and hs < 35:
+        return "CONSIDER EXIT"
+    if len(trims) >= 2 and not broken:
+        return "BOOK PART PROFIT"
     if sig == "BUY":
+        if weight >= 0.08:
+            return "HOLD (already large)"
         if (row.get("horizon") or {}).get("term") == "Short term":
-            return "SHORT-TERM TRADE" if weight < 0.08 else "HOLD (already large)"
-        return "BUY MORE" if weight < 0.08 else "HOLD (already large)"
+            return "SHORT-TERM TRADE"
+        e = row.get("entry")
+        return "HOLD (add on dip)" if e is not None and e < min_entry else "ADD MORE"
     if er is not None and er < 12:
         return "HOLD / REVIEW"
     return "HOLD"
@@ -33,10 +43,10 @@ def build(portfolios, rows, details, picks, market, prev, ipos, slot, target=20)
     prev_sig = {}
     for p in (prev or {}).get("portfolios", []):
         for h in p.get("holdings", []):
-            prev_sig[(p["name"], h["symbol"])] = h.get("signal")
+            prev_sig[(p["name"], h["symbol"])] = h.get("action") or h.get("signal")
     out = []
     for p in portfolios:
-        hs = []
+        hs, h_raw = [], {}
         inv = val = 0.0
         for h in p.get("holdings", []):
             sym = h["symbol"]
@@ -46,6 +56,7 @@ def build(portfolios, rows, details, picks, market, prev, ipos, slot, target=20)
             v = h["qty"] * px if px else i
             inv += i
             val += v
+            h_raw[sym] = h.get("raw")
             hs.append({"symbol": sym, "qty": h["qty"], "avg": h["avg"], "price": px, "invested": i, "value": v, "row": r})
         res = []
         ws = wsv = we = wev = 0.0
@@ -54,7 +65,7 @@ def build(portfolios, rows, details, picks, market, prev, ipos, slot, target=20)
             r = x["row"]
             d = details.get(x["symbol"]) or {}
             pts = d.get("points") or {}
-            act = _action(r, w)
+            act = _action(r, w, d)
             if r.get("overall") is not None and (r.get("stage") or 0) >= 2:
                 ws += r["overall"] * x["value"]; wsv += x["value"]
             if r.get("expected_return") is not None:
@@ -62,7 +73,7 @@ def build(portfolios, rows, details, picks, market, prev, ipos, slot, target=20)
             res.append({"symbol": x["symbol"], "qty": x["qty"], "avg": x["avg"], "price": x["price"],
                         "value": round(x["value"]), "weight": round(w * 100, 2),
                         "gain_pct": round((x["price"] / x["avg"] - 1) * 100, 1) if x["price"] else None,
-                        "signal": r.get("signal"), "score": r.get("overall"), "expected_return": r.get("expected_return"),
+                        "signal": r.get("signal"), "score": r.get("overall"), "hold": r.get("hold"), "raw": h_raw.get(x["symbol"]), "expected_return": r.get("expected_return"),
                         "action": act, "verdict": pts.get("verdict"),
                         "horizon": (r.get("horizon") or {}).get("term"), "period": (r.get("horizon") or {}).get("period"),
                         "horizon_note": (r.get("horizon") or {}).get("note"),
@@ -82,13 +93,13 @@ def build(portfolios, rows, details, picks, market, prev, ipos, slot, target=20)
             s = (rows.get(z["symbol"]) or {}).get("sector") or "Unknown"
             sect[s] = sect.get(s, 0) + z["weight"]
         alerts += [f"{s} is {w:.0f}% of the portfolio" for s, w in sect.items() if w > 25 and s != "Unknown"]
-        out.append({"name": p["name"], "value": round(val), "invested": round(inv),
+        out.append({"id": p.get("id"), "name": p["name"], "value": round(val), "invested": round(inv),
                     "gain_pct": round((val / inv - 1) * 100, 1) if inv else None,
                     "health": round(ws / wsv) if wsv else None,
                     "expected_return": round(er, 1) if er is not None else None,
                     "gap": round(er - target, 1) if er is not None else None,
-                    "changes": [{"symbol": z["symbol"], "from": z["prev_signal"], "to": z["signal"]}
-                                for z in res if z["prev_signal"] and z["signal"] and z["prev_signal"] != z["signal"]],
+                    "changes": [{"symbol": z["symbol"], "from": z["prev_signal"], "to": z["action"]}
+                                for z in res if z["prev_signal"] and z["prev_signal"] != z["action"] and z["prev_signal"] not in ("BUY", "HOLD", "SELL")],
                     "alerts": alerts, "holdings": res})
     m = market or {}
     movers = [x for x in m.get("markets", []) if x.get("chg_1d") is not None and x["key"] in
@@ -123,15 +134,15 @@ def as_text(rep, site_url=""):
                  f"expected {pc(p['expected_return'])}/yr" + (f" ({abs(p['gap']):.1f} pts short of target)" if (p['gap'] or 0) < 0 else ""))
         if p["changes"]:
             L.append("Changed: " + ", ".join(f"{c['symbol']} {c['from']}→{c['to']}" for c in p["changes"]))
-        for act in ("EXIT", "BUY MORE", "SHORT-TERM TRADE", "HOLD / REVIEW"):
+        for act in ("EXIT", "EXIT (no rush)", "CONSIDER EXIT", "BOOK PART PROFIT", "ADD MORE", "SHORT-TERM TRADE", "HOLD / REVIEW"):
             hs = [h for h in p["holdings"] if h["action"] == act]
             if not hs:
                 continue
             L.append(f"{act} ({len(hs)}):")
             for h in hs[:8]:
-                why = (h["against"] if act != "BUY MORE" else h["for"])[:2]
+                why = (h["against"] if act != "ADD MORE" else h["for"])[:2]
                 L.append(f" • {h['symbol']} {h['weight']:.1f}% · score {h['score'] or '—'}" + (f" · {h['horizon']} ({h['period']})" if h.get('horizon') else "") + (f" — {'; '.join(why)}" if why else ""))
-                if h.get("horizon_note") and act in ("BUY MORE", "SHORT-TERM TRADE", "EXIT"):
+                if h.get("horizon_note") and act in ("ADD MORE", "SHORT-TERM TRADE", "EXIT", "EXIT (no rush)"):
                     L.append(f"   {h['horizon_note']}")
         for a in p["alerts"][:4]:
             L.append(f"! {a}")

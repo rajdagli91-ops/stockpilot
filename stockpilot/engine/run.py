@@ -424,6 +424,7 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
                 sym = (resolved.get(sym) or {}).get("symbol")
                 if not sym:
                     continue
+                h["symbol"] = sym  # this run's copy only: the report then shows the stock it was matched to
             track.setdefault(sym.upper(), {"symbol": sym, "name": h.get("raw") or sym})
     print(f"tracking {len(track)} stocks from watchlist + {len(portfolios)} portfolios")
 
