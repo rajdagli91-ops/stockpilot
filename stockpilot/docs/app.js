@@ -338,6 +338,47 @@ async function cloudLoad(force = false) {
   } catch (e) { if (force) toast('Cloud load failed: ' + (String(e.message).includes('404') ? 'nothing saved yet' : e.name === 'OperationError' ? 'wrong passphrase' : e.message)); }
   return false;
 }
+// ---- settings sync: an encrypted copy of your settings (GitHub token, Claude key) in the repo, so any device
+// you sign in on gets them from your passphrase. The passphrase itself is never stored.
+const SYNC_PATH = 'config/settings-sync.enc.json';
+const syncFields = () => ({ ghOwner: settings.ghOwner, ghRepo: settings.ghRepo, ghToken: settings.ghToken, key: settings.key, model: settings.model, maxTokens: settings.maxTokens });
+async function settingsPush(quiet = true) {
+  if (!cloudReady() || !LS.get('syncOn', true)) return false;
+  try {
+    const path = '/contents/' + SYNC_PATH;
+    let sha; try { sha = (await gh(path)).sha; } catch { sha = undefined; }
+    const at = Date.now(), blob = await encryptObj({ ...syncFields(), updated: at }, settings.pass);
+    await gh(path, { method: 'PUT', body: JSON.stringify({ message: 'Update encrypted settings', content: utf8b64(JSON.stringify(blob)), ...(sha ? { sha } : {}) }) });
+    LS.set('settingsUpdated', at);
+    if (!quiet) toast('Settings synced. Sign in on another device with your passphrase to get them there.');
+    return true;
+  } catch (e) { if (!quiet) toast('Settings sync failed: ' + e.message); return false; }
+}
+async function settingsPull(force = false) {
+  // public repo: the encrypted file can be read without a token, which is the whole point on a new device
+  const owner = settings.ghOwner || guess.owner, repo = settings.ghRepo || guess.repo;
+  if (!settings.pass || !owner || !repo) return false;
+  let blob = null;
+  for (const url of [`https://api.github.com/repos/${owner}/${repo}/contents/${SYNC_PATH}`, `https://raw.githubusercontent.com/${owner}/${repo}/main/${SYNC_PATH}?t=${Date.now()}`]) {
+    try {
+      const r = await fetch(url, url.includes('api.github') ? { headers: { Accept: 'application/vnd.github.raw' }, cache: 'no-store' } : { cache: 'no-store' });
+      if (r.ok) { blob = await r.json(); break; }
+    } catch { }
+  }
+  if (!blob) { if (force) toast('No synced settings found yet. Save them on the device that has your token.'); return false; }
+  try {
+    const d = await decryptObj(blob, settings.pass);
+    if (!force && (d.updated || 0) <= LS.get('settingsUpdated', 0) && settings.ghToken) return false;
+    Object.assign(settings, Object.fromEntries(Object.entries(d).filter(([k, v]) => k !== 'updated' && v != null && v !== '')));
+    saveSettings(); LS.set('settingsUpdated', d.updated || Date.now());
+    return true;
+  } catch { if (force) toast('Synced settings could not be opened: they were saved with a different passphrase.'); return false; }
+}
+async function settingsUnsync() {
+  if (!ghReady()) return;
+  try { const f = await gh('/contents/' + SYNC_PATH); await gh('/contents/' + SYNC_PATH, { method: 'DELETE', body: JSON.stringify({ message: 'Remove encrypted settings', sha: f.sha }) }); toast('Synced settings removed from GitHub. This device keeps its own copy.'); }
+  catch (e) { toast(String(e.message).includes('404') ? 'Nothing was synced.' : 'Could not remove: ' + e.message); }
+}
 let REPORTS = null;
 async function loadReports() {
   if (!settings.pass) return null;
@@ -1064,7 +1105,7 @@ function viewIpos() {
 function viewSettings() {
   const v = $('#view');
   v.innerHTML = `
-    <div><h1>Settings</h1><p class="sub">Everything here is stored only in this browser.</p></div>
+    <div><h1>Settings</h1><p class="sub">Stored in this browser. Turn on sync below to have them on your other devices too.</p></div>
     <div class="card"><h2>GitHub (for Fetch, Analyse now and cloud save)</h2>
       <p class="sub">Create a fine-grained token at github.com → Settings → Developer settings → Fine-grained tokens. Give it access to <b>only this repository</b>, with <b>Actions: Read and write</b> and <b>Contents: Read and write</b>. Without a token the site still updates on schedule; you just can't fetch on demand or save portfolios to the cloud.</p>
       <div class="row" style="margin-top:14px">
@@ -1073,6 +1114,11 @@ function viewSettings() {
         <label>Token<input id="ght" type="password" value="${esc(settings.ghToken)}" placeholder="github_pat_…" autocomplete="off"></label>
       </div>
       <div class="tools" style="margin-top:12px"><button class="btn" id="ghsave">Save</button><button class="btn ghost" id="ghtest">Test connection</button><button class="btn ghost" id="fullscan">Run full market scan</button><span class="hint" id="ghmsg"></span></div>
+    </div>
+    <div class="card"><h2>Sync settings across devices</h2>
+      <p class="sub">Keeps an <b>encrypted</b> copy of your GitHub token and Claude key in your repository, locked with your passphrase. On a new phone or laptop just sign in: they load by themselves. The repository is public, so this copy is only as safe as your passphrase; use 12+ characters that aren't a common word. Your passphrase itself is never saved.</p>
+      <label class="inl" style="margin-top:12px"><input type="checkbox" id="syncon" ${LS.get('syncOn', true) ? 'checked' : ''}> Sync automatically when I press Save here</label>
+      <div class="tools" style="margin-top:12px"><button class="btn" id="syncnow">Sync now</button><button class="btn ghost" id="syncpull">Load from other device</button><button class="btn danger" id="syncdel">Remove synced copy</button><span class="hint" id="syncmsg">${LS.get('settingsUpdated', 0) ? 'Last synced ' + new Date(LS.get('settingsUpdated')).toLocaleString('en-IN') : 'Not synced yet'}</span></div>
     </div>
     <div class="card"><div class="cardhead"><h2>Sign-in</h2><button class="btn ghost small" id="signout">Sign out</button></div><p class="sub">User ID is set by the GitHub secret <code>LOGIN_USER</code>; the password is your portfolio passphrase (<code>PORTFOLIO_KEY</code>). Signing out removes them from this device.</p></div>
     <div class="card"><h2>Portfolio passphrase</h2>
@@ -1100,13 +1146,17 @@ function viewSettings() {
         ${Object.entries(META.weights || {}).map(([k, w]) => `<tr><td>${esc(k.replace(/_/g, ' '))}</td><td class="num">${w}</td></tr>`).join('')}</tbody></table></div>
     </div>`;
   const readGh = () => { settings.ghOwner = $('#gho').value.trim(); settings.ghRepo = $('#ghr').value.trim(); settings.ghToken = $('#ght').value.trim(); saveSettings(); };
-  $('#ghsave').addEventListener('click', () => { readGh(); $('#ghmsg').textContent = 'Saved'; });
+  $('#ghsave').addEventListener('click', async () => { readGh(); $('#ghmsg').textContent = 'Saved'; if (await settingsPush()) $('#ghmsg').textContent = 'Saved and synced to your other devices'; });
   $('#ghtest').addEventListener('click', async () => { readGh(); try { const r = await gh(''); $('#ghmsg').textContent = 'Connected to ' + r.full_name; } catch (e) { $('#ghmsg').textContent = e.message; } });
   $('#fullscan').addEventListener('click', () => { readGh(); dispatch('full'); });
   $('#signout').addEventListener('click', signOut);
   $('#psave').addEventListener('click', async () => { const pw = $('#pass').value; if (pw && pw.length < 12) { $('#pmsg').textContent = 'Use at least 12 characters.'; return; } settings.pass = pw; saveSettings(); REPORTS = null; $('#pmsg').textContent = 'Saved'; if (cloudReady() && await cloudLoad()) toast('Loaded newer portfolios from cloud.'); });
-  $('#save').addEventListener('click', () => { settings.key = $('#key').value.trim(); settings.model = $('#model').value.trim() || 'claude-haiku-5-5'; settings.maxTokens = +$('#maxt').value || 350; saveSettings(); $('#saved').textContent = 'Saved'; });
-  $('#clear').addEventListener('click', () => { settings.key = ''; saveSettings(); viewSettings(); });
+  $('#save').addEventListener('click', async () => { settings.key = $('#key').value.trim(); settings.model = $('#model').value.trim() || 'claude-haiku-5-5'; settings.maxTokens = +$('#maxt').value || 350; saveSettings(); $('#saved').textContent = 'Saved'; if (await settingsPush()) $('#saved').textContent = 'Saved and synced'; });
+  $('#clear').addEventListener('click', async () => { settings.key = ''; saveSettings(); await settingsPush(); viewSettings(); });
+  $('#syncon').addEventListener('change', e => LS.set('syncOn', e.target.checked));
+  $('#syncnow').addEventListener('click', async () => { if (!cloudReady()) { $('#syncmsg').textContent = 'Add the GitHub token and passphrase first.'; return; } const was = LS.get('syncOn', true); LS.set('syncOn', true); const ok = await settingsPush(false); LS.set('syncOn', was); if (ok) $('#syncmsg').textContent = 'Synced just now'; });
+  $('#syncpull').addEventListener('click', async () => { if (await settingsPull(true)) { toast('Settings loaded from your other device.'); viewSettings(); } });
+  $('#syncdel').addEventListener('click', settingsUnsync);
 }
 
 // ================================================================ boot
@@ -1147,6 +1197,7 @@ function signOut() { LS.set('auth', null); settings.pass = ''; saveSettings(); l
   $('#fetch').addEventListener('click', e => { e.stopPropagation(); menu.hidden = !menu.hidden; });
   menu.addEventListener('click', async e => { const b = e.target.closest('[data-mode]'); if (!b) return; menu.hidden = true; await cloudSaveIfDirty(); dispatch(b.dataset.mode); });
   document.addEventListener('click', e => { if (!e.target.closest('.fetchbox')) menu.hidden = true; });
+  if (settings.pass && await settingsPull()) toast('Settings loaded from your other device.');
   if (cloudReady()) await cloudLoad();
   await loadData();
   go();
