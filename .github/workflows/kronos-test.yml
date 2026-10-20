@@ -1,0 +1,41 @@
+name: Kronos research test
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "NeoQuasar/Kronos-small or NeoQuasar/Kronos-mini or NeoQuasar/Kronos-base"
+        default: "NeoQuasar/Kronos-small"
+      samples:
+        description: "forecast paths averaged per stock"
+        default: "5"
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Install
+        run: |
+          git clone -q --depth 1 https://github.com/shiyu-coder/Kronos.git /tmp/Kronos
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q "numpy<2.3" pandas yfinance einops==0.8.1 huggingface_hub==0.33.1 safetensors tqdm
+      - name: Run backtest
+        env:
+          KRONOS_DIR: /tmp/Kronos
+          KRONOS_MODEL: ${{ inputs.model }}
+          SAMPLES: ${{ inputs.samples }}
+        run: |
+          mkdir -p /tmp/out && cd /tmp/out
+          python ${{ github.workspace }}/stockpilot/research/kronos_test.py 2>&1 | tee log.txt
+      - name: Save results (research branch)
+        if: always()
+        run: |
+          cd /tmp/out
+          git init -q && git checkout -q -b research
+          git add -A
+          git -c user.name=stockpilot-bot -c user.email=stockpilot-bot@users.noreply.github.com commit -qm "kronos test $(date -u +%F_%H%M)"
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" research
