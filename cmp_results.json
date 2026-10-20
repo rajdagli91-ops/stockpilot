@@ -1,0 +1,68 @@
+{
+ "window": [
+  "2025-09-01",
+  "2026-09-04"
+ ],
+ "dates": 26,
+ "stocks": 50,
+ "21d": {
+  "OLD_stockpilot": {
+   "entry_ic": -0.0157,
+   "entry_ic_t": -0.52,
+   "pick_ic": 0.0036,
+   "pick_ic_t": 0.12,
+   "hold_ic": -0.0172,
+   "hold_ic_t": -0.48,
+   "rule_after_costs": -0.0726,
+   "hold_all_equal": -0.0145,
+   "rule_beats_equal_per_period": -0.0042,
+   "avg_stocks_bought": 10.0,
+   "consider_exit_next_month": -0.0011,
+   "healthy_next_month": -0.0015
+  },
+  "NEW_stockpilot": {
+   "entry_ic": -0.0024,
+   "entry_ic_t": -0.07,
+   "pick_ic": 0.0026,
+   "pick_ic_t": 0.08,
+   "hold_ic": 0.0068,
+   "hold_ic_t": 0.21,
+   "rule_after_costs": -0.075,
+   "hold_all_equal": -0.0145,
+   "rule_beats_equal_per_period": -0.0044,
+   "avg_stocks_bought": 10.0,
+   "consider_exit_next_month": -0.0146,
+   "healthy_next_month": -0.0009
+  }
+ },
+ "10d": {
+  "OLD_stockpilot": {
+   "entry_ic": -0.0199,
+   "entry_ic_t": -0.68,
+   "pick_ic": 0.007,
+   "pick_ic_t": 0.22,
+   "hold_ic": -0.0195,
+   "hold_ic_t": -0.58,
+   "rule_after_costs": -0.0713,
+   "hold_all_equal": 0.0003,
+   "rule_beats_equal_per_period": -0.0028,
+   "avg_stocks_bought": 10.0,
+   "consider_exit_next_month": 0.0013,
+   "healthy_next_month": -0.0006
+  },
+  "NEW_stockpilot": {
+   "entry_ic": 0.0068,
+   "entry_ic_t": 0.21,
+   "pick_ic": 0.0111,
+   "pick_ic_t": 0.34,
+   "hold_ic": 0.0136,
+   "hold_ic_t": 0.45,
+   "rule_after_costs": -0.0999,
+   "hold_all_equal": 0.0003,
+   "rule_beats_equal_per_period": -0.004,
+   "avg_stocks_bought": 10.0,
+   "consider_exit_next_month": -0.0092,
+   "healthy_next_month": 0.0004
+  }
+ }
+}
