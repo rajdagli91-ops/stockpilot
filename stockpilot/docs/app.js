@@ -52,7 +52,7 @@ function rescoreHold(xc, gates, trims) {
     if (!isOn(c.k)) return; const s = xc?.[i];
     if (s != null && c.w) { num += s * c.w; den += c.w; }
     if (HCAP()[c.k] != null && (gates & (1 << i))) capped.push(c.k);
-    if (trims & (1 << i)) tr.push(c.k);
+    if ((trims & (1 << i)) && c.w) tr.push(c.k);  // only factors that count (stretch factors are info-only now)
   });
   if (!den) return null;
   let sc = num / den;
@@ -65,7 +65,8 @@ function holdCall(s, w = 0) {
   if (!s || (s.stage || 0) < 2 || !s.signal || s.signal === 'SCAN' || s.signal === 'NO DATA') return 'NOT ANALYSED';
   const h = rowHold(s), hs = h?.score, e = rowEntry(s);
   if (s.signal === 'SELL') return hs != null && hs >= 55 && !h.broken ? 'EXIT (no rush)' : 'EXIT';
-  if (hs != null && hs < 35) return 'CONSIDER EXIT';
+  // tested: price weakness alone flagged stocks that then rebounded, so an exit warning also needs a weak business score
+  if (hs != null && hs < 35) return (s.overall ?? 100) < 55 ? 'CONSIDER EXIT' : 'HOLD (watch)';
   if (h && h.trims.length >= 2 && !h.broken) return 'BOOK PART PROFIT';
   if (s.signal === 'BUY') {
     if (w >= 0.08) return 'HOLD (already large)';
@@ -133,8 +134,8 @@ function entryFactorsHtml() {
   if (!ECHK().length) return '';
   const groups = [...new Set(ECHK().map(c => c.group))], nOn = ECHK().filter(c => isOn(c.k)).length;
   return `<details class="card efac" id="efac" ${efOpen ? 'open' : ''}><summary><b>Entry &amp; exit factors</b> <span class="hint">${nOn} of ${ECHK().length} switched on · tap to choose which ones decide the entry score (top picks) and the hold score (portfolio calls)</span></summary>
-    <div class="efgrid">${groups.map(g => `<div><div class="ph">${esc(g)}</div>${ECHK().filter(c => c.group === g).map(c => `<label class="ef"><input type="checkbox" data-ef="${c.k}" ${isOn(c.k) ? 'checked' : ''}> <span>${esc(c.label)} <span class="muted">×${c.w}${c.cap != null ? ' · can block' : ''}</span></span></label>`).join('')}</div>`).join('')}</div>
-    <div class="tools" style="margin-top:10px"><button class="btn ghost small" id="efall">Switch all on</button><span class="hint">×N = how much it counts. "Can block" = when it fails, the stock can't be a top pick however good the rest looks (at its 52-week high, over 40% above its 200-day average, results within 7 days, or a falling trend).</span></div></details>`;
+    <div class="efgrid">${groups.map(g => `<div><div class="ph">${esc(g)}</div>${ECHK().filter(c => c.group === g).map(c => `<label class="ef"><input type="checkbox" data-ef="${c.k}" ${isOn(c.k) ? 'checked' : ''}> <span>${esc(c.label)} <span class="muted">${c.w ? '×' + c.w : 'info only'}${c.cap != null ? ' · can block' : ''}</span></span></label>`).join('')}</div>`).join('')}</div>
+    <div class="tools" style="margin-top:10px"><button class="btn ghost small" id="efall">Switch all on</button><span class="hint">×N = how much it counts. "Info only" = shown but not counted: tested on 3 years of NSE prices, waiting because a stock looked stretched (near its high, far above its averages, high RSI) made picks worse, so these no longer count. "Can block" = when it fails, the stock can't be a top pick (results within 7 days, or a falling trend).</span></div></details>`;
 }
 function wireEntryFactors(v, redraw) {
   const box = v.querySelector('#efac'); if (!box) return;
@@ -530,7 +531,7 @@ function actionReasons(r) {
   const A = r.action;
   if (A === 'EXIT') out.push(h && h.score < 55 ? 'Rated SELL and the hold checklist agrees: the money is likely to do better elsewhere.' : 'Rated SELL: weak enough that the money is likely to do better elsewhere.');
   else if (A === 'EXIT (no rush)') out.push('Rated SELL on the business, but the price trend is still healthy, so sell in parts or on the first sign of the trend breaking.');
-  else if (A === 'CONSIDER EXIT') out.push(`Not rated SELL, but the hold checklist is weak (${h.score}/100): ${h.broken ? 'the trend has broken and ' : ''}most factors point down. Decide whether your original reason to own it still holds.`);
+  else if (A === 'CONSIDER EXIT') out.push(`Not rated SELL, but both the business score (${Math.round(s.overall)}) and the hold checklist (${h.score}/100) are weak. Decide whether your original reason to own it still holds.`);
   else if (A === 'BOOK PART PROFIT') out.push(`Still a ${model === 'SELL' ? 'weak' : 'reasonable'} business, but stretched or expensive (${h.trims.join(', ')}): selling a part locks in gains and lowers risk.`);
   else if (A === 'HOLD (already large)') out.push(`Rated BUY, but it is already ${w.toFixed(1)}% of this portfolio (8% is the cap per stock), so hold rather than add.`);
   else if (A === 'ADD MORE') out.push(`Rated BUY, only ${w.toFixed(1)}% of the portfolio and the entry checklist is OK now, so there is room to add.`);
@@ -956,6 +957,7 @@ function viewPortfolios() {
     </div>
     <div class="card cloud"><div><b>Saved in this browser.</b> <span class="hint" id="cloudstate">${cloudReady() ? (LS.get('cloudSaved', 0) ? 'Cloud copy saved ' + new Date(LS.get('cloudSaved')).toLocaleString('en-IN') : 'Not saved to cloud yet') : 'Add GitHub + a passphrase in Settings to save an encrypted copy, so scheduled reports (pre-market, 1 PM, 3 PM) include your portfolios and other devices can load them.'}</span></div>
       <div class="tools"><button class="btn ghost small" id="csave">Save to cloud</button><button class="btn ghost small" id="cload">Load from cloud</button></div></div>
+    <div class="card" id="riskcard"><div class="cardhead"><h2>Risk &amp; stress test</h2><span class="hint">How this portfolio behaves in a shock, Aladdin-style</span></div><div id="riskbody" class="muted">Working it out…</div></div>
     <div class="card"><div class="cardhead"><h2>Today's analysis</h2><span class="hint">Data from ${esc(META.updated || '—')}</span></div>${reportHtml(p)}</div>
     <div class="card" id="reports"><div class="cardhead"><h2>Scheduled reports: ${esc(p.name)}</h2><span class="hint">Pre-market, 1 PM and 3 PM · this portfolio only · last 2 days</span></div><div id="replist" class="muted">${settings.pass ? 'Loading…' : 'Set your passphrase in Settings to read reports.'}</div></div>
     <div class="card"><h2>Add holdings</h2>
@@ -993,6 +995,7 @@ function viewPortfolios() {
   $('#csave').addEventListener('click', () => cloudSave());
   $('#cload').addEventListener('click', async () => { if (!cloudReady()) { toast('Set GitHub and a passphrase in Settings first.'); return; } if (await cloudLoad(true)) { toast('Loaded portfolios from cloud.'); viewPortfolios(); } });
   renderReports();
+  renderRisk(p);
   $('#pt thead').addEventListener('click', e => { const th = e.target.closest('th[data-k]'); if (!th?.dataset.k) return; const k = th.dataset.k; pfSort.dir = pfSort.key === k ? -pfSort.dir : (['symbol', 'action'].includes(k) ? 1 : -1); pfSort.key = k; viewPortfolios(); });
   $('#pt tbody').addEventListener('click', e => {
     const del = e.target.closest('[data-del]');
@@ -1191,6 +1194,65 @@ async function reportPdf(r, p) {
     doc.text(t('Score = overall model score (0-100). Hold = hold score (0-100, higher = keep holding).'), M, 823);
     doc.text(`Page ${i} of ${pages}`, W - M, 823, { align: 'right' }); }
   doc.save(t(`StockPilot ${p.name} ${r.slot} ${r.time.slice(0, 16)}`).replace(/[^A-Za-z0-9 _-]+/g, '').replace(/\s+/g, '_') + '.pdf');
+}
+
+// ---- Aladdin-style risk: sensitivities from 2 years of weekly returns (engine/risk.py), applied to your weights
+async function renderRisk(p) {
+  const box = $('#riskbody'); if (!box) return;
+  const st = pfStats(p), total = st.val;
+  if (!st.rows.length || !total) { box.textContent = 'Add holdings to see how the portfolio would behave in a shock.'; return; }
+  const withRk = st.rows.filter(r => Array.isArray(r.s?.rk) && r.s.rk[0] != null);
+  const cov = withRk.reduce((a, r) => a + r.val, 0) / total;
+  if (!withRk.length) { box.textContent = 'Risk numbers appear after the next full market scan (they need 2 years of weekly prices for each stock).'; return; }
+  const W = withRk.reduce((a, r) => a + r.val, 0);
+  const wt = r => r.val / W;
+  const sum = f => withRk.reduce((a, r) => a + wt(r) * (f(r) || 0), 0);
+  const beta = sum(r => r.s.rk[0]);
+  const scen = [
+    ['Nifty falls 10%', r => r.s.rk[0] * -10],
+    ['Nifty falls 20%', r => r.s.rk[0] * -20],
+    ['Crude oil rises 30%', r => (r.s.rk[1] || 0) * 30],
+    ['Rupee weakens 5% (₹/$ up 5%)', r => (r.s.rk[2] || 0) * 5],
+    ['US 10-year yield up 1 point', r => (r.s.rk[3] || 0) * 1],
+  ].map(([label, f]) => {
+    const parts = withRk.map(r => ({ sym: r.symbol, rs: r.val * f(r) / 100 })).sort((a, b) => a.rs - b.rs);
+    const pct = sum(f);
+    return { label, pct, rs: total * cov * pct / 100, worst: parts.filter(x => x.rs < 0).slice(0, 3), best: parts.filter(x => x.rs > 0).slice(-2).reverse() };
+  });
+  const effN = 1 / st.rows.reduce((a, r) => a + r.w * r.w, 0);
+  const lowR2 = sum(r => r.s.rk[4]);
+  const row = x => `<tr><td>${esc(x.label)}</td><td class="num ${x.pct >= 0 ? 'pos' : 'neg'}">${pc(x.pct, 1)}</td><td class="num ${x.rs >= 0 ? 'pos' : 'neg'}">${x.rs >= 0 ? '+' : '−'}${inr(Math.abs(x.rs))}</td><td class="hide-sm hint" style="white-space:normal">${x.worst.length ? 'Hit most: ' + x.worst.map(w => esc(w.sym.replace(/\.BO$/, '')) + ' ' + inr(Math.abs(w.rs))).join(', ') : ''}${x.best.length ? (x.worst.length ? ' · ' : '') + 'Gain: ' + x.best.map(w => esc(w.sym.replace(/\.BO$/, ''))).join(', ') : ''}</td></tr>`;
+  const words = [];
+  words.push(`<b>Market sensitivity (beta) ${beta.toFixed(2)}</b>: when the Nifty moves 1%, this portfolio tends to move about ${beta.toFixed(2)}%. ${beta > 1.15 ? 'More aggressive than the market.' : beta < 0.85 ? 'Calmer than the market.' : 'About as risky as the market.'}`);
+  words.push(`<b>${st.rows.length} stocks, but the weights make it behave like about ${effN.toFixed(1)} equal positions.</b> ${effN < st.rows.length * 0.5 ? 'A few big holdings dominate.' : 'Reasonably spread.'}`);
+  words.push(`<b>${Math.round(lowR2 * 100)}% of the weekly ups and downs</b> come from the market, crude, the rupee and rates; the rest is company-specific.`);
+  box.classList.remove('muted');
+  box.innerHTML = `<ul class="risklist">${words.map(w => `<li>${w}</li>`).join('')}</ul>
+    <div class="tbox" style="margin-top:10px"><table><thead><tr><th>If this happens…</th><th class="num">Portfolio</th><th class="num">₹ impact</th><th class="hide-sm">Who drives it</th></tr></thead><tbody>${scen.map(row).join('')}<tr id="replayrow"><td colspan="4" class="muted">Replaying the worst past month…</td></tr></tbody></table></div>
+    <p class="hint">Each shock moves one thing and holds the rest steady, using each stock's measured reaction over the last 2 years of weekly prices. Real crises move several things at once; the replay row shows one that actually happened. ${cov < 0.99 ? `Covers ${Math.round(cov * 100)}% of the portfolio's value (the rest has no risk numbers yet).` : ''}</p>
+    <div id="ddline" class="hint"></div>`;
+  // replay a real past shock and the 2-year worst fall, using each holding's weekly prices
+  const sh = MARKET.shock;
+  const ds = await Promise.all(st.rows.map(r => r.s && (r.s.stage || 0) >= 2 ? loadDetail(r.symbol).catch(() => null) : null));
+  const series = st.rows.map((r, i) => ({ r, w: ds[i]?.weekly || [] })).filter(x => x.w.length > 20);
+  const near = (w, date) => { let v = null; for (const [d, c] of w) { if (d <= date) v = c; else break; } return v; };
+  const rr = $('#replayrow');
+  if (sh && series.length && rr) {
+    let num = 0, den = 0; const hits = [];
+    for (const { r, w } of series) { const a = near(w, sh.from), b = near(w, sh.to); if (a && b) { const ch = (b / a - 1) * 100; num += r.val * ch; den += r.val; hits.push({ sym: r.symbol, rs: r.val * ch / 100 }); } }
+    if (den) { const pct = num / den; hits.sort((a, b) => a.rs - b.rs);
+      rr.outerHTML = row({ label: `Replay: ${sh.from} to ${sh.to} (Nifty ${pc(sh.nifty_chg, 1)})`, pct, rs: total * (den / total) * pct / 100, worst: hits.filter(x => x.rs < 0).slice(0, 3), best: hits.filter(x => x.rs > 0).slice(-2).reverse() }); }
+    else rr.remove();
+  } else if (rr) rr.remove();
+  // portfolio as held today, over the last 2 years of weekly prices: worst fall and swing
+  if (series.length) {
+    const dates = [...new Set(series.flatMap(x => x.w.map(p => p[0])))].sort();
+    const vals = dates.map(d => { let v = 0, ok = 0; for (const { r, w } of series) { const c = near(w, d), last = w[w.length - 1][1]; if (c) { v += r.val * c / last; ok += r.val; } } return ok ? v / ok : null; }).filter(v => v != null);
+    let peak = -Infinity, dd = 0; for (const v of vals) { peak = Math.max(peak, v); dd = Math.min(dd, v / peak - 1); }
+    const rets = vals.slice(1).map((v, i) => v / vals[i] - 1), m = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const vol = Math.sqrt(rets.reduce((a, b) => a + (b - m) ** 2, 0) / (rets.length - 1)) * Math.sqrt(52) * 100;
+    $('#ddline').innerHTML = `If you had held today's portfolio for the last 2 years: worst fall from a peak <b class="neg">${pc(dd * 100, 0)}</b>, typical yearly swing about <b>±${vol.toFixed(0)}%</b>. Your stated limit is a 25–30% fall${dd < -0.30 ? ': <b class="neg">this portfolio has gone past it</b>' : ''}.`;
+  }
 }
 
 // ================================================================ view: global market + exchange events

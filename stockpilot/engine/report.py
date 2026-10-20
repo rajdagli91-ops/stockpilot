@@ -24,7 +24,7 @@ def _action(row, weight, detail=None, min_entry=55):
     if sig == "SELL":
         return "EXIT (no rush)" if hs is not None and hs >= 55 and not broken else "EXIT"
     if hs is not None and hs < 35:
-        return "CONSIDER EXIT"
+        return "CONSIDER EXIT" if (row.get("overall") or 100) < 55 else "HOLD (watch)"
     if len(trims) >= 2 and not broken:
         return "BOOK PART PROFIT"
     if sig == "BUY":

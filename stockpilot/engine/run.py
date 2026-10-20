@@ -29,6 +29,7 @@ from engine.providers import nse_files, screener
 from engine.providers import global_mkts
 from engine.providers import news as news_p
 from engine.providers import commodity
+from engine import risk as risk_mod
 from engine.providers import resolve as resolver
 from engine.providers import yahoo
 
@@ -39,7 +40,7 @@ SCAN = S["scan"]
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 FIELDS = ["symbol", "name", "sector", "price", "overall", "signal", "confidence", "expected_return",
           "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event", "horizon",
-          "mcap_cr", "cap", "entry", "pe", "ec", "eg", "xc", "xt", "hold", "nw"]
+          "mcap_cr", "cap", "entry", "pe", "ec", "eg", "xc", "xt", "hold", "nw", "rk"]
 
 
 def fname(sym):
@@ -111,6 +112,9 @@ def stage1(names, bench, prov):
     return out
 
 
+RISK_F = None  # weekly Nifty / crude / rupee / rates changes, set once per run in main()
+
+
 def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_news=True, extra_filings=()):
     errors, f = [], {}
     try:
@@ -133,6 +137,11 @@ def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_new
     tilt = global_mkts.sector_tilt(market, f.get("sector"))
     why = ((market or {}).get("tilts") or {}).get(f.get("sector") or "", {}).get("why", [])
     sc = scoring.score_stock(f, t, headlines, filings, {"score": tilt, "why": why} if tilt is not None else None, sym)
+    try:
+        rk = risk_mod.stock_risk(hist, RISK_F)
+    except Exception as e:
+        rk = {}
+        errors.append(f"risk: {e}")
     weekly = []
     if hist is not None and len(hist):
         w = hist["Close"].resample("W-FRI").last().dropna().iloc[-104:]
@@ -141,7 +150,7 @@ def full_analysis(sym, name, hist, t, prov, newsp, market, bse_code="", with_new
             "price": round(t["price"], 2) if t.get("price") else None, "bse_code": bse_code,
             "fundamentals": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in f.items()},
             "technicals": {k: (round(v, 2) if isinstance(v, float) else v) for k, v in t.items()},
-            "headlines": headlines, "filings": filings[:12], "weekly": weekly, "errors": errors,
+            "headlines": headlines, "filings": filings[:12], "weekly": weekly, "errors": errors, "risk": rk,
             "stage": 3 if with_news else 2, "analysed": dt.datetime.now(IST).strftime("%Y-%m-%d %H:%M"), **sc}
 
 
@@ -159,6 +168,7 @@ def row_from(d, base):
     r["xc"], r["xt"] = entry_mod.compact_hold(e.get("checks") or [])
     r["hold"] = (e.get("hold") or {}).get("score")
     r["nw"] = d.get("news_brief")
+    r["rk"] = risk_mod.compact(d.get("risk") or {})
     return r
 
 
@@ -380,6 +390,15 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     except Exception as e:
         print(f"global markets skipped: {e}")
 
+    # ---- drivers for the per-stock risk numbers (beta, crude, rupee, rates) and a past shock to replay
+    global RISK_F
+    if not sample:
+        try:
+            RISK_F = risk_mod.factor_weekly(prov)
+            market["shock"] = risk_mod.worst_window(prov)
+            jsave(OUT / "market.json", market, compact=False)
+        except Exception as e:
+            print(f"risk factors skipped: {e}")
     # ---- shared entry-check context: market regime, delivery %, bulk/block deals, screener cache
     ctx = scoring.CTX
     ctx.clear()

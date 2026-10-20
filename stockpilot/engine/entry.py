@@ -14,10 +14,13 @@ import numpy as np
 # key: (label, group, default weight, gate cap or None)
 CHECKS = {
     "trend":     ("Trend: price above 200-day avg and 50-day above 200-day", "Price", 1, 45),
-    "vs50":      ("Price vs 50-day average (short-term stretch)", "Price", 3, None),
-    "vs200":     ("Price vs 200-day average (long-term stretch)", "Price", 2, 54),
-    "rsi":       ("RSI: momentum not overheated", "Price", 2, None),
-    "hi52":      ("Distance from 52-week high", "Price", 1, 54),
+    # vs50 / vs200 / rsi / hi52 are shown for information but count 0 by default: tested on 3 years of NSE data
+    # (research/redesign_test.py) "stretched, so wait" made picks WORSE; stocks near highs kept rising.
+    "mom":       ("Momentum: 12-month return (excluding the last month)", "Price", 3, None),
+    "vs50":      ("Price vs 50-day average (short-term stretch)", "Price", 0, None),
+    "vs200":     ("Price vs 200-day average (long-term stretch)", "Price", 0, None),
+    "rsi":       ("RSI: momentum not overheated", "Price", 0, None),
+    "hi52":      ("Distance from 52-week high", "Price", 0, None),
     "risk":      ("Risk to stop-loss (50-day avg / 20-day low)", "Price", 2, None),
     "squeeze":   ("Volatility: calm now vs its usual swings", "Price", 1, None),
     "volume":    ("Volume: buying vs selling pressure (50 days)", "Money flow", 2, None),
@@ -99,6 +102,11 @@ def build(sym, f, t, ctx=None):
         out.append(_chk("hi52", interp(hi, [(-45, 15), (-30, 45), (-18, 85), (-8, 95), (-5, 60), (0, 45)]),
                         f"{hi:.1f}%", "At its 52-week high" if hi > -0.5 else f"{abs(hi):.0f}% below its 52-week high" +
                         (": too close to the peak" if near else ": has pulled back from the peak" if hi > -25 else ": far below the peak, check why"), gate=near, num=hi))
+    m = t.get("ret_12_1")
+    if m is not None:
+        out.append(_chk("mom", interp(m, [(-40, 10), (-15, 30), (0, 45), (15, 60), (30, 72), (60, 85), (100, 92)]), f"{m:+.0f}%",
+                        "Strong 12-month run: winners tend to keep winning for a while" if m >= 30 else
+                        "Positive 12-month run" if m > 5 else "Weak 12-month run: losers tend to keep lagging" if m < -10 else "Flat over 12 months", num=m))
     low20 = t.get("low20")
     stop = None
     if low20 and low20 < price:
@@ -279,7 +287,7 @@ def summarize_hold(checks):
     s, capped = hold_score(checks)
     if s is None:
         return None
-    trims = [c["k"] for c in checks if c.get("t")]
+    trims = [c["k"] for c in checks if c.get("t") and CHECKS[c["k"]][2]]
     bad = sorted((c for c in checks if c.get("xst") == "bad"), key=lambda c: c["x"])
     good = sorted((c for c in checks if c.get("xst") == "good"), key=lambda c: -c["x"])
     verdict = (("Exit warning: trend broken and several factors weak" if capped else "Exit warning: several factors weak") if s < 35 else

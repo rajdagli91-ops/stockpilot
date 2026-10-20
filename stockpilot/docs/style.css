@@ -238,3 +238,4 @@ body.locked>header,body.locked>main,body.locked>#banner,body.locked>footer{displ
 .pbar{display:flex;height:22px;border-radius:6px;overflow:hidden;font-size:12px;font-weight:600}
 .pbar i{display:flex;align-items:center;padding:0 8px;font-style:normal;white-space:nowrap;overflow:hidden;min-width:0}
 .pbar .up{background:var(--buy-bg);color:var(--buy)}.pbar .dn{background:var(--sell-bg);color:var(--sell);justify-content:flex-end}
+.risklist{margin:4px 0 0;padding-left:18px;font-size:14px;line-height:1.55}.risklist li{margin:3px 0}

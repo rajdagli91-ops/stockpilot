@@ -56,7 +56,8 @@ def technicals(df: pd.DataFrame, bench: pd.DataFrame | None) -> dict:
     return {"price": last, "dma50": dma50, "dma200": dma200, "rsi": rsi, "ret_12m": ret12, "rel_12m": rel,
             "from_52w_high": (last / hi52 - 1) * 100, "volatility": vol,
             "vs_200dma": (last / dma200 - 1) * 100 if dma200 else None,
-            "low20": float(c.iloc[-20:].min()), "vol_ratio": vol_ratio, "acc_ratio": acc}
+            "low20": float(c.iloc[-20:].min()), "vol_ratio": vol_ratio, "acc_ratio": acc,
+            "ret_12_1": float((c.iloc[-22] / c.iloc[-253] - 1) * 100) if len(c) >= 253 else None}
 
 
 # ---------- 20% CAGR hurdle: expected annual return over the next ~5 years
