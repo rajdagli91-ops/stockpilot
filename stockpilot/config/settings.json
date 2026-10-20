@@ -1,6 +1,6 @@
 {
   "_about": "Model settings. Weights are relative (any numbers). Thresholds are on the 0-100 overall score.",
-  "target_cagr": 18,
+  "target_cagr": 20,
   "max_drawdown_tolerance": 30,
   "benchmark": "^NSEI",
   "weights": {
@@ -44,8 +44,8 @@
   },
   "horizons": {
     "_about": "Return rules for calls. Long-term BUY needs expected return >= long_term_min_cagr %/yr. Short-term BUY needs upside to target >= short_term_min_return % within ~3 months, an uptrend, and reward/risk >= 1.5.",
-    "long_term_min_cagr": 15,
-    "long_term_good_cagr": 18,
+    "long_term_min_cagr": 20,
+    "long_term_good_cagr": 23,
     "short_term_min_return": 12,
     "short_term_max_stop_pct": 8
   }
