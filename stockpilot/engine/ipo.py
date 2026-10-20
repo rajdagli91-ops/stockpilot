@@ -437,12 +437,37 @@ def analyse(ipo, details, market, newsp=None):
             "headlines": headlines}
 
 
+def _key(name):
+    """Same IPO from different sources: compare the first two real words ("Zetwerk Manufacturing Businesses Limited"
+    and "Zetwerk Manufacturing Business" are one IPO)."""
+    w = [x for x in re.findall(r"[a-z0-9]+", name.lower()) if x not in ("the", "limited", "ltd", "india", "private", "pvt")]
+    return " ".join(w[:2])
+
+
+def _live(x, today):
+    """Drop IPOs whose subscription has closed; set Open / Upcoming from the dates rather than the source's label."""
+    try:
+        cl = dt.date.fromisoformat((x.get("close") or "")[:10]) if x.get("close") else None
+        op = dt.date.fromisoformat((x.get("open") or "")[:10]) if x.get("open") else None
+    except ValueError:
+        return True
+    if cl and cl < today:
+        return False
+    if op and op > today:
+        x["status"] = "Upcoming"
+    elif op and op <= today and (not cl or cl >= today):
+        x["status"] = "Open"
+    return True
+
+
 def run(details, market, newsp=None):
+    today = dt.datetime.now(dt.timezone(dt.timedelta(hours=5, minutes=30))).date()
     byname = {}
     for x in nse_ipos() + web_ipos() + csv_ipos():  # later sources overwrite earlier ones with the same name
-        k = re.sub(r"[^a-z0-9]", "", re.sub(r"\b(limited|ltd)\b", "", x["name"].lower()))
+        k = _key(x["name"])
         byname[k] = {**byname.get(k, {}), **{a: b for a, b in x.items() if b not in (None, "", [])}}
-    out = [analyse(x, details, market, newsp) for x in byname.values()]
+    live = [x for x in byname.values() if _live(x, today)]
+    out = [analyse(x, details, market, newsp) for x in live]
     order = {"APPLY": 0, "NEUTRAL": 1, "NEED DATA": 2, "AVOID": 3}
     out.sort(key=lambda x: (order.get(x["call"], 9), -(x["score"] or 0)))
     return out

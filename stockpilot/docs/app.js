@@ -178,7 +178,11 @@ async function loadData(bust = false) {
   const opt = f => fetch('data/' + f + q, { cache: 'no-cache' }).then(r => r.ok ? r.json() : null).catch(() => null);
   const [m, e, i, is, rs] = await Promise.all([opt('market.json'), opt('events.json'), opt('ipos.json'), opt('isin.json'), opt('resolved.json')]);
   ISIN = is || {}; RESOLVED = rs || {};
-  MARKET = m || {}; EVENTS = e?.events || []; IPOS = i?.ipos || []; IPO_UPDATED = i?.updated || '';
+  MARKET = m || {}; EVENTS = e?.events || []; IPO_UPDATED = i?.updated || '';
+  // an IPO drops off the day after it closes, even if no scan has run since; Open / Upcoming follow today's date
+  const todayIST = new Date(Date.now() + 5.5 * 36e5).toISOString().slice(0, 10);
+  IPOS = (i?.ipos || []).filter(x => !x.close || String(x.close).slice(0, 10) >= todayIST)
+    .map(x => ({ ...x, status: x.open && String(x.open).slice(0, 10) > todayIST ? 'Upcoming' : x.open ? 'Open' : x.status }));
   BY = new Map(ROWS.map(r => [r.symbol, r]));
   detailCache.clear();
   if (applyResolved()) toast('Found the stocks you added on NSE / BSE and loaded their data.');
