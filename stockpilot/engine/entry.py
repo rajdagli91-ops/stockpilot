@@ -32,7 +32,9 @@ CHECKS = {
     "pe_sector": ("P/E vs listed sector peers", "Valuation", 2, None),
     "quarter":   ("Latest quarter vs long-term growth", "Business", 2, None),
     "results":   ("Results date (avoid buying just before)", "Timing", 1, 54),
-    "market":    ("Market: Nifty trend + India VIX", "Timing", 2, None),
+    # info only: a 3-year walk-forward test (research/walkforward_test.py) found market/global readings did not
+    # predict the next month, so a falling market no longer lowers every stock's entry score
+    "market":    ("Market: Nifty trend + India VIX", "Timing", 0, None),
 }
 ORDER = list(CHECKS)
 MIN_ENTRY = 55
