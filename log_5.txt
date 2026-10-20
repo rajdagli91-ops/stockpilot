@@ -1,0 +1,9 @@
+
+1 Failed download:
+['ADANIPORTS.NS']: OperationalError('database is locked')
+loaded 49 stocks
+4 anchors from 2025-11-13 to 2026-08-06
+shard 5: date 2025-11-13 done, 306s
+shard 5: date 2026-02-09 done, 604s
+shard 5: date 2026-05-12 done, 904s
+shard 5: date 2026-08-06 done, 1206s
