@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - name: Install
-        run: pip install -q -r stockpilot/requirements.txt
+        run: pip install -q -r stockpilot/requirements.txt scikit-learn
       - name: Run backtest
         env:
           SP_DIR: ${{ github.workspace }}/stockpilot
