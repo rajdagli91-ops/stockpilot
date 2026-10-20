@@ -1,6 +1,10 @@
 name: StockPilot research test
 on:
   workflow_dispatch:
+    inputs:
+      script:
+        description: "research script to run"
+        default: "stockpilot_test.py"
 permissions:
   contents: write
 jobs:
@@ -18,7 +22,7 @@ jobs:
           SP_DIR: ${{ github.workspace }}/stockpilot
         run: |
           mkdir -p /tmp/out && cd /tmp/out
-          python ${{ github.workspace }}/stockpilot/research/stockpilot_test.py 2>&1 | tee sp_log.txt
+          python ${{ github.workspace }}/stockpilot/research/${{ inputs.script || 'stockpilot_test.py' }} 2>&1 | tee sp_log.txt
       - name: Save results (research-sp branch)
         if: always()
         run: |
