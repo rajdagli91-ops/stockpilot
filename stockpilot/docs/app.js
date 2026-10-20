@@ -1056,9 +1056,14 @@ function viewPortfolios() {
     const callAt = (r, t) => { if (!r.s) return 'NOT ANALYSED'; const x = signalAt(r.s, t); const keep = pickPrefs.tgt; pickPrefs.tgt = t; const c = holdCall({ ...r.s, ...x }, r.w); pickPrefs.tgt = keep; return c; };
     const rows = st.rows.slice().sort((a, b) => b.val - a.val);
     const changes = rows.filter(r => new Set(ts.map(t => callAt(r, t))).size > 1).length;
-    box.innerHTML = `<p class="hint" style="margin-top:10px">Each holding's call if your target were each of these. ${changes} of ${rows.length} holdings change call somewhere in this range; the rest don't depend on the target.</p>
+    box.innerHTML = `<div class="tools" style="margin-top:10px"><button class="btn ghost small" id="cmppdf">Download PDF</button></div><p class="hint" style="margin-top:6px">Each holding's call if your target were each of these. ${changes} of ${rows.length} holdings change call somewhere in this range; the rest don't depend on the target.</p>
       <div class="tbox"><table><thead><tr><th>Stock</th><th class="num">Exp. return</th>${ts.map(t => `<th class="${t === target() ? 'on' : ''}">${t}%${t === target() ? ' (now)' : ''}</th>`).join('')}</tr></thead><tbody>
       ${rows.map(r => `<tr><td><b>${esc(isPlaceholder(r.symbol) ? (r.raw || '') : r.symbol.replace(/\.BO$/, ''))}</b></td><td class="num">${pc(r.s?.expected_return)}</td>${ts.map(t => `<td>${pill(callAt(r, t))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    $('#cmppdf').addEventListener('click', async ev => {
+      const b = ev.currentTarget; b.disabled = true; b.textContent = 'Making PDF…';
+      try { await comparePdf(p, rows, ts, callAt, changes); } catch (err) { toast('PDF failed: ' + err.message); }
+      b.disabled = false; b.textContent = 'Download PDF';
+    });
   });
   $('#csave').addEventListener('click', () => cloudSave());
   $('#cload').addEventListener('click', async () => { if (!cloudReady()) { toast('Set GitHub and a passphrase in Settings first.'); return; } if (await cloudLoad(true)) { toast('Loaded portfolios from cloud.'); viewPortfolios(); } });
@@ -1218,6 +1223,33 @@ async function renderReports() {
     });
   };
   draw();
+}
+// ---- PDF of the "calls at other targets" comparison
+async function comparePdf(p, rows, ts, callAt, changes) {
+  if (!window.jspdf) await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+  if (!window.jspdf?.jsPDF?.API?.autoTable) await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js');
+  const { jsPDF } = window.jspdf, doc = new jsPDF({ unit: 'pt', format: 'a4', orientation: 'landscape' });
+  const t = x => String(x ?? '').replace(/₹/g, 'Rs ').replace(/[–—]/g, '-').replace(/[^\x20-\x7E]/g, '');
+  const W = doc.internal.pageSize.getWidth(), M = 36, now = new Date(Date.now() + 5.5 * 36e5).toISOString().slice(0, 16).replace('T', ' ');
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(16); doc.text('StockPilot: calls at different target returns', M, 44);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10); doc.setTextColor(100);
+  doc.text(t(`${p.name}  |  data ${META.updated || ''}  |  printed ${now} IST  |  your current target ${target()}%/yr`), M, 62);
+  doc.setTextColor(0);
+  doc.text(t(`${changes} of ${rows.length} holdings change call somewhere between ${ts[0]}% and ${ts[ts.length - 1]}%; the rest do not depend on the target.`), M, 80);
+  const colour = a => /EXIT/.test(a) ? [176, 42, 42] : /ADD|BUY/.test(a) ? [26, 120, 70] : /BOOK|REVIEW|watch/.test(a) ? [160, 110, 0] : [60, 60, 60];
+  const body = rows.map(r => [t(isPlaceholder(r.symbol) ? (r.raw || '') : r.symbol.replace(/\.BO$/, ' (BSE)')),
+    r.s?.expected_return != null ? (r.s.expected_return >= 0 ? '+' : '') + r.s.expected_return.toFixed(1) + '%' : '-', (r.w * 100).toFixed(1) + '%', ...ts.map(x => t(callAt(r, x)))]);
+  doc.autoTable({ startY: 92, head: [['Stock', 'Exp. return/yr', 'Weight', ...ts.map(x => x + '%' + (x === target() ? ' (now)' : ''))]], body,
+    styles: { fontSize: 8, cellPadding: 3 }, headStyles: { fillColor: [40, 40, 40] },
+    columnStyles: { 0: { fontStyle: 'bold', cellWidth: 90 }, 1: { halign: 'right', cellWidth: 62 }, 2: { halign: 'right', cellWidth: 44 } },
+    didParseCell: d => { if (d.section === 'body' && d.column.index >= 3) { d.cell.styles.textColor = colour(d.cell.raw); d.cell.styles.fontStyle = 'bold'; }
+      if (d.section === 'body' && d.column.index >= 3 && ts[d.column.index - 3] === target()) d.cell.styles.fillColor = [242, 242, 236]; },
+    margin: { left: M, right: M } });
+  const pages = doc.getNumberOfPages(), H = doc.internal.pageSize.getHeight();
+  for (let i = 1; i <= pages; i++) { doc.setPage(i); doc.setFontSize(8); doc.setTextColor(120);
+    doc.text(t('Rule-based signals from StockPilot, not investment advice. A lower target does not change what a business is likely to earn; it only changes which calls you accept.'), M, H - 18);
+    doc.text(`Page ${i} of ${pages}`, W - M, H - 18, { align: 'right' }); }
+  doc.save(t(`StockPilot ${p.name} target comparison ${now.slice(0, 10)}`).replace(/[^A-Za-z0-9 _-]+/g, '').replace(/\s+/g, '_') + '.pdf');
 }
 // ---- PDF of one portfolio's report (real text and tables, so it stays small and searchable)
 function loadScript(src) { return new Promise((ok, bad) => { const s = document.createElement('script'); s.src = src; s.onload = ok; s.onerror = () => bad(new Error('could not load the PDF maker; check your connection')); document.head.appendChild(s); }); }
