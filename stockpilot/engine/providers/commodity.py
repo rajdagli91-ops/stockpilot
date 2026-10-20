@@ -93,6 +93,12 @@ def outlook(close, usdinr=None, news=None) -> dict | None:
                            "base_up": round(float((allv > 0).mean()) * 100)}
     sig1m = vol * np.sqrt(21 / 252)
     rng = [round(last * float(np.exp(-sig1m)), 2), round(last * float(np.exp(sig1m)), 2)]
+    # how often this range held in the past (same rule, using only data before each date): shown next to the range
+    lr = np.log(c)
+    s63 = lr.diff().rolling(63).std() * np.sqrt(21)
+    move = (lr.shift(-21) - lr).abs()
+    ok = (move <= s63).iloc[63:-21].iloc[::5]
+    range_held = round(float(ok.mean()), 3) if len(ok) > 50 else None
 
     news = news or []
     pos, neg = sum(1 for x in news if x["tone"] > 0), sum(1 for x in news if x["tone"] < 0)
@@ -126,9 +132,51 @@ def outlook(close, usdinr=None, news=None) -> dict | None:
             "chg": {"1w": ret(5), "1m": ret(21), "3m": ret(63), "1y": ret(252)},
             "dma50": round(float(d50.iloc[-1]), 2), "dma200": round(float(d200.iloc[-1]), 2), "rsi": round(float(rsi.iloc[-1]), 1),
             "hi52": round(hi52, 2), "lo52": round(lo52, 2), "vol": round(vol * 100, 1), "range_1m": rng,
-            "range_1m_inr": [inr(rng[0]), inr(rng[1])], "trend": trend, "momentum": mom, "prob": probs,
+            "range_1m_inr": [inr(rng[0]), inr(rng[1])], "range_held": range_held, "trend": trend, "momentum": mom, "prob": probs,
             "years": round(len(c) / 252, 1), "verdict": verdict, "why": why,
             "news": news[:10], "news_pos": pos, "news_neg": neg, "news_tone": ntone, "impact": impact}
+
+
+def gold_news(days: int = 7, limit: int = 10) -> list:
+    """Latest gold headlines (shown as context only: their tone has not been tested, so no up/down reading)."""
+    import feedparser
+    seen, out = set(), []
+    cutoff = dt.datetime.utcnow() - dt.timedelta(days=days)
+    for q in ("gold price", "gold rate India", "MCX gold"):
+        feed = feedparser.parse(f"https://news.google.com/rss/search?q={quote_plus(q)}&hl=en-IN&gl=IN&ceid=IN:en")
+        for e in feed.entries[:30]:
+            when = dt.datetime(*e.published_parsed[:6]) if getattr(e, "published_parsed", None) else None
+            if when and when < cutoff:
+                continue
+            title = re.sub(r"\s+-\s+[^-]+$", "", e.title)
+            k = re.sub(r"\W+", "", title.lower())[:60]
+            if k in seen or not re.search(r"\bgold\b", title.lower()):
+                continue
+            seen.add(k)
+            out.append({"title": title, "date": when.strftime("%Y-%m-%d") if when else "", "link": e.link, "tone": 0})
+    out.sort(key=lambda x: x["date"], reverse=True)
+    return out[:limit]
+
+
+def fetch_gold(prov, usdinr=None) -> dict | None:
+    h = prov.history("GC=F", period="10y")
+    if h is None or not len(h):
+        return None
+    try:
+        news = gold_news()
+    except Exception as e:
+        print(f"gold news skipped: {e}")
+        news = []
+    o = outlook(h["Close"], None, news)
+    if not o:
+        return o
+    per10g = lambda usd: round(usd * usdinr / 31.1035 * 10) if usdinr and usd else None
+    o.update({"name": "Gold", "unit": "US$ per troy ounce", "usdinr": usdinr, "inr_unit": "per 10 g",
+              "last_inr": per10g(o["last"]), "range_1m_inr": [per10g(o["range_1m"][0]), per10g(o["range_1m"][1])],
+              "news_tone": "context only", "news_pos": 0, "news_neg": 0,
+              "impact": ["Rising gold helps: jewellers' inventory (Titan, Kalyan, Senco), gold-loan companies (Muthoot, Manappuram) and holders of gold ETFs/SGBs.",
+                         "A gold rally often means investors are nervous (war, inflation, falling rates); it tends to come with a weaker rupee and higher Indian gold import costs."]})
+    return o
 
 
 def fetch_crude(prov, usdinr=None) -> dict | None:
@@ -140,4 +188,7 @@ def fetch_crude(prov, usdinr=None) -> dict | None:
     except Exception as e:
         print(f"oil news skipped: {e}")
         news = []
-    return outlook(h["Close"], usdinr, news)
+    o = outlook(h["Close"], usdinr, news)
+    if o:
+        o["inr_unit"] = "per barrel"
+    return o

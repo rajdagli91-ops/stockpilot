@@ -5,18 +5,19 @@ For every analysed stock, from 2 years of weekly returns:
   b_crude  extra move for a 1% move in Brent crude, holding the Nifty, rupee and rates fixed
   b_inr    extra move for a 1% weaker rupee (USD/INR up 1%)
   b_rates  extra move for a 1-point rise in the US 10-year yield
-  r2       how much of its weekly moves these four explain (low = mostly company-specific)
+  b_gold   extra move for a 1% rise in gold
+  r2       how much of its weekly moves these five explain (low = mostly company-specific)
   dd2y     worst peak-to-trough fall in 2 years (%), worst4w = worst 4-week fall (%)
-These come from one regression on all four drivers together, so each number is that driver's own effect.
+These come from one regression on all five drivers together, so each number is that driver's own effect.
 """
 import numpy as np
 import pandas as pd
 
-FACTORS = {"nifty": "^NSEI", "crude": "BZ=F", "inr": "INR=X", "rates": "^TNX"}
+FACTORS = {"nifty": "^NSEI", "crude": "BZ=F", "inr": "INR=X", "rates": "^TNX", "gold": "GC=F"}
 
 
 def factor_weekly(prov) -> pd.DataFrame | None:
-    """Weekly changes of the four drivers over ~2 years (rates: change in yield points, others: % change)."""
+    """Weekly changes of the five drivers over ~2 years (rates: change in yield points, others: % change)."""
     cols = {}
     for k, sym in FACTORS.items():
         try:
@@ -48,7 +49,7 @@ def stock_risk(hist: pd.DataFrame, F: pd.DataFrame | None) -> dict:
         coef, *_ = np.linalg.lstsq(X, y, rcond=None)
         resid = y - X @ coef
         out["r2"] = round(float(1 - resid.var() / y.var()), 2) if y.var() > 0 else None
-        names = {"nifty": "beta", "crude": "b_crude", "inr": "b_inr", "rates": "b_rates"}
+        names = {"nifty": "beta", "crude": "b_crude", "inr": "b_inr", "rates": "b_rates", "gold": "b_gold"}
         for k, b in zip(xs, coef[1:]):
             out[names[k]] = round(float(b), 2)
     last2y = c.iloc[-504:]
@@ -60,10 +61,10 @@ def stock_risk(hist: pd.DataFrame, F: pd.DataFrame | None) -> dict:
 
 
 def compact(rk: dict) -> list | None:
-    """For universe.json: [beta, b_crude, b_inr, b_rates, r2, dd2y]."""
+    """For universe.json: [beta, b_crude, b_inr, b_rates, r2, dd2y, b_gold]."""
     if not rk:
         return None
-    return [rk.get(k) for k in ("beta", "b_crude", "b_inr", "b_rates", "r2", "dd2y")]
+    return [rk.get(k) for k in ("beta", "b_crude", "b_inr", "b_rates", "r2", "dd2y", "b_gold")]
 
 
 def worst_window(prov) -> dict | None:

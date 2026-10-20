@@ -389,6 +389,7 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
             fx = next((m["last"] for m in market.get("markets", []) if m["key"] == "usdinr"), None)
             market["crude"] = commodity.fetch_crude(prov, fx)
             print(f"crude: {(market['crude'] or {}).get('verdict')}")
+            market["gold"] = commodity.fetch_gold(prov, fx)
         except Exception as e:
             print(f"crude outlook skipped: {e}")
         jsave(OUT / "market.json", market, compact=False)

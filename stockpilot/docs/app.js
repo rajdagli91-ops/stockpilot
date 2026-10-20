@@ -1319,6 +1319,7 @@ async function renderRisk(p) {
     ['Crude oil rises 30%', r => (r.s.rk[1] || 0) * 30],
     ['Rupee weakens 5% (₹/$ up 5%)', r => (r.s.rk[2] || 0) * 5],
     ['US 10-year yield up 1 point', r => (r.s.rk[3] || 0) * 1],
+    ['Gold rises 15%', r => (r.s.rk[6] || 0) * 15],
   ].map(([label, f]) => {
     const parts = withRk.map(r => ({ sym: r.symbol, rs: r.val * f(r) / 100 })).sort((a, b) => a.rs - b.rs);
     const pct = sum(f);
@@ -1330,7 +1331,7 @@ async function renderRisk(p) {
   const words = [];
   words.push(`<b>Market sensitivity (beta) ${beta.toFixed(2)}</b>: when the Nifty moves 1%, this portfolio tends to move about ${beta.toFixed(2)}%. ${beta > 1.15 ? 'More aggressive than the market.' : beta < 0.85 ? 'Calmer than the market.' : 'About as risky as the market.'}`);
   words.push(`<b>${st.rows.length} stocks, but the weights make it behave like about ${effN.toFixed(1)} equal positions.</b> ${effN < st.rows.length * 0.5 ? 'A few big holdings dominate.' : 'Reasonably spread.'}`);
-  words.push(`<b>${Math.round(lowR2 * 100)}% of the weekly ups and downs</b> come from the market, crude, the rupee and rates; the rest is company-specific.`);
+  words.push(`<b>${Math.round(lowR2 * 100)}% of the weekly ups and downs</b> come from the market, crude, gold, the rupee and rates; the rest is company-specific.`);
   box.classList.remove('muted');
   box.innerHTML = `<ul class="risklist">${words.map(w => `<li>${w}</li>`).join('')}</ul>
     <div class="tbox" style="margin-top:10px"><table><thead><tr><th>If this happens…</th><th class="num">Portfolio</th><th class="num">₹ impact</th><th class="hide-sm">Who drives it</th></tr></thead><tbody>${scen.map(row).join('')}<tr id="replayrow"><td colspan="4" class="muted">Replaying the worst past month…</td></tr></tbody></table></div>
@@ -1381,20 +1382,21 @@ function crudeHtml(c) {
     <div class="hint">Typical move ${p.median >= 0 ? '+' : ''}${p.median}% · from ${f0.format(p.n)} similar days (${esc(p.matched)}) · any day: ${p.base_up}% up</div></div>`;
   const ch = c.chg || {};
   const tone = t => `<span class="tone" style="background:${t > 0 ? 'var(--buy)' : t < 0 ? 'var(--sell)' : 'var(--nodata)'}"></span>`;
-  return `<div class="card crude"><div class="cardhead"><h2>Crude oil (Brent): trend and outlook</h2><span class="hint">Prices to ${esc(c.date)} · updated with each run</span></div>
+  const unit = c.inr_unit || 'per barrel', title = c.name === 'Gold' ? 'Gold: trend and range' : 'Crude oil (Brent): trend and range';
+  return `<div class="card crude"><div class="cardhead"><h2>${title}</h2><span class="hint">Prices to ${esc(c.date)} · updated with each run</span></div>
     <div class="crudetop">
-      <div><div class="big mono">$${n(c.last)}</div><div class="hint">${esc(c.unit)}${c.last_inr ? ` · ≈ ₹${n(c.last_inr, f0)} per barrel at ₹${n(c.usdinr)}/$` : ''}</div>
+      <div><div class="big mono">$${n(c.last)}</div><div class="hint">${esc(c.unit)}${c.last_inr ? ` · ≈ ₹${n(c.last_inr, f0)} ${unit} at ₹${n(c.usdinr)}/$` : ''}</div>
         <div class="chgs">${[['1 week', ch['1w']], ['1 month', ch['1m']], ['3 months', ch['3m']], ['1 year', ch['1y']]].map(([l, v]) => `<span>${l} <b class="${v >= 0 ? 'pos' : 'neg'}">${pc(v, 1)}</b></span>`).join('')}</div></div>
       <div style="flex:1 1 320px"><div class="sig"><b>Likely range next month: $${n(c.range_1m[0])}–$${n(c.range_1m[1])}</b></div>
-        <div class="hint">${c.range_1m_inr?.[0] ? `≈ ₹${n(c.range_1m_inr[0], f0)}–₹${n(c.range_1m_inr[1], f0)} per barrel · ` : ''}about a 2 in 3 chance. Tested on 2014–2026: the price ended inside this range 67% of the time (target 68%), so it can be trusted as a guide to how far oil may move.</div>
-        <div class="hint" style="margin-top:8px"><b>No up/down call.</b> Odds based on the trend were tested on the same 12 years and were right only 46% of the time (worse than a coin flip), so they are not shown. Nobody reliably predicts oil's direction a month ahead.</div></div>
+        <div class="hint">${c.range_1m_inr?.[0] ? `≈ ₹${n(c.range_1m_inr[0], f0)}–₹${n(c.range_1m_inr[1], f0)} ${unit} · ` : ''}about a 2 in 3 chance.${c.range_held != null ? ` Checked on the last ${c.years} years: the price ended inside this kind of range ${Math.round(c.range_held * 100)}% of the time (target 68%), so it is a fair guide to how far it may move.` : ''}</div>
+        <div class="hint" style="margin-top:8px"><b>No up/down call.</b> ${c.name === 'Gold' ? 'Direction calls are not made for gold either: the same trend-based odds failed for crude, and there is no tested method.' : 'Odds based on the trend were tested on 2014–2026 and were right only 46% of the time (worse than a coin flip), so they are not shown. Nobody reliably predicts oil\'s direction a month ahead.'}</div></div>
     </div>
     <div class="grid2" style="margin-top:12px">
       <div><div class="ph">Trend</div><ul>${c.why.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
         <div class="hint">50-day avg $${n(c.dma50)} · 200-day avg $${n(c.dma200)} · 52-week $${n(c.lo52)}–$${n(c.hi52)}</div>
         <div class="ph" style="margin-top:10px">What it means for Indian stocks</div><ul>${c.impact.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>
-      <div><div class="ph">News this week: ${esc(c.news_tone)} <span class="hint">(${c.news_pos} pointing up, ${c.news_neg} down, ${c.news.length - c.news_pos - c.news_neg} neutral)</span></div>
-        <div class="news"><ul>${c.news.map(x => `<li>${tone(x.tone)}<span class="d">${esc(newsAge(x.date))}</span> <a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a></li>`).join('') || '<li class="muted">No oil news found this week.</li>'}</ul></div></div>
+      <div><div class="ph">News this week${c.name === 'Gold' ? '' : `: ${esc(c.news_tone)} <span class="hint">(${c.news_pos} pointing up, ${c.news_neg} down, ${c.news.length - c.news_pos - c.news_neg} neutral)</span>`}</div>
+        <div class="news"><ul>${c.news.map(x => `<li>${tone(x.tone)}<span class="d">${esc(newsAge(x.date))}</span> <a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a></li>`).join('') || '<li class="muted">No news found this week.</li>'}</ul></div></div>
     </div>
     <p class="hint">The range comes from how much Brent has been swinging over the last 3 months. Green/red dots on headlines are a keyword reading of what each implies for the price; headline tone could not be tested on history (no free archive of past oil news), so treat it as context, not a signal.</p></div>`;
 }
@@ -1409,6 +1411,7 @@ function viewMarket() {
     <div class="card verdict"><div class="big" style="color:${scoreColor(MARKET.mood)}">${MARKET.mood ?? '—'}</div>
       <div><div class="sig">${esc(MARKET.bias || 'No data')}</div><div class="hint">Global mood, 0–100. Overnight US and Asian markets, fear indices, crude, dollar, yields and the rupee.</div></div></div>
     ${crudeHtml(MARKET.crude)}
+    ${crudeHtml(MARKET.gold)}
     <div class="grid2">
       <div class="card"><h2>Markets</h2><div class="tbox" style="margin-top:12px;border:0"><table><thead><tr><th>Market</th><th class="num">Last</th><th class="num">1 day</th><th class="num">5 days</th></tr></thead><tbody>
         ${Object.entries(groups).map(([g, ms]) => `<tr><td colspan="4" class="grp">${esc(g)}</td></tr>` + ms.map(m => `<tr><td>${esc(m.label)}</td><td class="num">${mktLast(m, fx)}</td><td class="num ${m.chg_1d >= 0 ? 'pos' : 'neg'}">${pc(m.chg_1d, 2)}</td><td class="num ${m.chg_5d >= 0 ? 'pos' : 'neg'}">${pc(m.chg_5d, 1)}</td></tr>`).join('')).join('')}
