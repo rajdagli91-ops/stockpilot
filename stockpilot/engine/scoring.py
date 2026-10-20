@@ -129,6 +129,12 @@ def entry_timing(f: dict, t: dict, peg: float | None) -> dict | None:
             "peg": round(peg, 2) if peg is not None else None, "pe": round(f["pe"], 1) if f.get("pe") else None}
 
 
+def er_score(er, target):
+    """Expected-return rating relative to the target (same curve the website uses when you change the target)."""
+    T = float(target or 18)
+    return interp(er, [(0, 0), (0.45 * T, 15), (0.67 * T, 35), (0.83 * T, 60), (T, 80), (1.33 * T, 100)])
+
+
 def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None = None, sym: str | None = None) -> dict:
     s = SETTINGS
     fin = (f.get("sector") or "").lower().startswith("financial")
@@ -157,8 +163,8 @@ def score_stock(f: dict, t: dict, news: list, filings: list, macro: dict | None 
 
     params = {
         # ---- fundamentals
-        "expected_return": ("Expected return (target 15–18%/yr)", "fundamental",
-                            interp(er, [(0, 0), (8, 15), (12, 35), (15, 60), (18, 80), (24, 100)]), er, "%/yr"),
+        # graded against YOUR target (settings: horizons.long_term_min_cagr): 80 = exactly on target, 100 = a third above
+        "expected_return": ("Expected return vs your target", "fundamental", er_score(er, s["horizons"]["long_term_min_cagr"]), er, "%/yr"),
         "profit_growth": ("Profit growth (3y CAGR)", "fundamental",
                           interp(f.get("profit_cagr"), [(-10, 0), (0, 15), (10, 50), (20, 85), (28, 100)]), f.get("profit_cagr"), "%"),
         "revenue_growth": ("Revenue growth (3y CAGR)", "fundamental",

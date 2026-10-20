@@ -41,7 +41,7 @@ SCAN = S["scan"]
 IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 FIELDS = ["symbol", "name", "sector", "price", "overall", "signal", "confidence", "expected_return",
           "ret_12m", "traded_cr", "stage", "fundamental", "technical", "news", "exchange", "event", "horizon",
-          "mcap_cr", "cap", "entry", "pe", "ec", "eg", "xc", "xt", "hold", "nw", "rk"]
+          "mcap_cr", "cap", "entry", "pe", "ec", "eg", "xc", "xt", "hold", "nw", "rk", "tp", "wc", "rf"]
 
 
 def fname(sym):
@@ -170,6 +170,11 @@ def row_from(d, base):
     r["hold"] = (e.get("hold") or {}).get("score")
     r["nw"] = d.get("news_brief")
     r["rk"] = risk_mod.compact(d.get("risk") or {})
+    # what the website needs to re-rate the stock for another target: trend rating and how much each rating counts
+    pp = {x["key"]: x for x in (d.get("params") or [])}
+    r["tp"] = (pp.get("trend") or {}).get("score")
+    r["wc"] = sum(x.get("weight") or 0 for x in pp.values() if x.get("score") is not None) or None
+    r["rf"] = (pp.get("red_flags") or {}).get("value")
     return r
 
 

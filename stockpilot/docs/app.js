@@ -203,28 +203,41 @@ async function loadDetail(sym) {
 // The engine rates against the target saved on GitHub; only the "expected return >= target" test depends on the
 // target, so the rating for any other target can be worked out from the engine's numbers without a new scan.
 const savedTarget = () => META.horizons?.long_term_min_cagr ?? META.target_cagr ?? 20;
+const lerp = (x, pts) => { if (x == null) return null; if (x <= pts[0][0]) return pts[0][1]; for (let i = 1; i < pts.length; i++) if (x <= pts[i][0]) { const [x0, y0] = pts[i - 1], [x1, y1] = pts[i]; return y0 + (y1 - y0) * (x - x0) / (x1 - x0); } return pts[pts.length - 1][1]; };
+const erScore = (er, T) => lerp(er, [[0, 0], [0.45 * T, 15], [0.67 * T, 35], [0.83 * T, 60], [T, 80], [1.33 * T, 100]]);  // = engine/scoring.py er_score
 function signalAt(r, tgt) {
-  const sig0 = r._sig0 ?? r.signal, hz0 = r._hz0 ?? r.horizon;
-  if (!sig0 || sig0 === 'SCAN' || sig0 === 'NO DATA' || (r.stage || 0) < 2) return { signal: sig0, horizon: hz0 };
-  if (tgt === savedTarget()) return { signal: sig0, horizon: hz0 };
-  const er = r.expected_return, ov = r.overall ?? 0, fund = r.fundamental ?? 0;
-  // red flag: from news, or a SELL that can't be explained by a weak score or weak return
-  const red = (r.nw?.flags > 0) || (sig0 === 'SELL' && ov >= (META.thresholds?.sell ?? 45) && (er ?? 0) >= 12);
-  const longOk = ov >= (META.thresholds?.buy ?? 66) && er != null && er >= tgt && fund >= 55 && !red;
+  const sig0 = r._sig0 ?? r.signal, hz0 = r._hz0 ?? r.horizon, ov0 = r._ov0 ?? r.overall, f0_ = r._f0 ?? r.fundamental;
+  const same = { signal: sig0, horizon: hz0, overall: ov0, fundamental: f0_ };
+  if (!sig0 || sig0 === 'SCAN' || sig0 === 'NO DATA' || (r.stage || 0) < 2 || tgt === savedTarget()) return same;
+  const er = r.expected_return, T0 = savedTarget(), w = META.weights?.expected_return ?? 16;
+  // the expected-return rating is graded against the target, so the overall score moves with it
+  const e0 = erScore(er, T0), e1 = erScore(er, tgt);
+  const d = e0 != null && e1 != null ? e1 - e0 : 0;
+  const ov = ov0 == null ? null : Math.max(0, Math.min(100, ov0 + w * d / (r.wc || 105)));
+  const fund = f0_ == null ? null : Math.max(0, Math.min(100, f0_ + w * d / 56));
+  const red = (r.rf || 0) > 0 || (r.nw?.flags || 0) > 0;
+  const trendWeak = r.tp != null ? r.tp < 40 : !!(((r.eg || 0) >> 0) & 1);
+  const th = META.thresholds || {};
+  const longOk = ov != null && ov >= (th.buy ?? 66) && er != null && er >= tgt && (fund ?? 0) >= 55 && !red;
   const shortBuy = sig0 === 'BUY' && hz0?.term === 'Short term';
-  if (longOk) return { signal: 'BUY', horizon: { term: 'Long term', period: '3+ years', expected: er, note: `Expected ~${Math.round(er)}%/yr, meets your ${tgt}% target. Review after each quarterly result.` } };
-  if (shortBuy) return { signal: 'BUY', horizon: hz0 };
-  if (sig0 === 'SELL') return { signal: 'SELL', horizon: hz0 };
-  return { signal: 'HOLD', horizon: er != null && er >= tgt ? { term: 'Long term', period: 'hold 3+ years', expected: er, note: "Business is on track for your target; the price/trend isn't ready for fresh buying." }
+  const sell = ov != null && (ov < (th.sell ?? 45) || red || (e1 != null && e1 < (th.sell_hurdle_score ?? 35) && trendWeak));
+  const out = { overall: ov == null ? ov : Math.round(ov * 10) / 10, fundamental: fund == null ? fund : Math.round(fund * 10) / 10 };
+  if (longOk) return { ...out, signal: 'BUY', horizon: { term: 'Long term', period: '3+ years', expected: er, note: `Expected ~${Math.round(er)}%/yr, meets your ${tgt}% target. Review after each quarterly result.` } };
+  if (shortBuy) return { ...out, signal: 'BUY', horizon: hz0 };
+  if (sell) return { ...out, signal: 'SELL', horizon: { term: 'Exit', period: 'now', note: `Unlikely to reach your ${tgt}% target; free the money for better ideas.` } };
+  return { ...out, signal: 'HOLD', horizon: er != null && er >= tgt ? { term: 'Long term', period: 'hold 3+ years', expected: er, note: "Business is on track for your target; the price/trend isn't ready for fresh buying." }
     : { term: 'Review', period: 'in 3–6 months', expected: er, note: `Expected return ${er != null ? '~' + Math.round(er) + '%/yr' : 'unclear'} is below your ${tgt}% target. Re-check after next results.` } };
 }
 function applyTarget() {
   const t = target();
-  for (const r of ROWS) { if (r._sig0 === undefined) { r._sig0 = r.signal; r._hz0 = r.horizon; } const x = signalAt(r, t); r.signal = x.signal; r.horizon = x.horizon; }
+  for (const r of ROWS) {
+    if (r._sig0 === undefined) { r._sig0 = r.signal; r._hz0 = r.horizon; r._ov0 = r.overall; r._f0 = r.fundamental; }
+    const x = signalAt(r, t); r.signal = x.signal; r.horizon = x.horizon; r.overall = x.overall; r.fundamental = x.fundamental;
+  }
   for (const d of detailCache.values()) syncDetail(d);
   _held = null;
 }
-function syncDetail(d) { const r = d && BY.get(d.symbol); if (r) { d.signal = r.signal; d.horizon = r.horizon; } return d; }
+function syncDetail(d) { const r = d && BY.get(d.symbol); if (r) { d.signal = r.signal; d.horizon = r.horizon; d.overall = r.overall; } return d; }
 let tgtSaveTimer = null;
 function setTarget(t, redraw) {
   pickPrefs.tgt = t; LS.set('pickPrefs', pickPrefs); applyTarget(); redraw && redraw();
@@ -1040,7 +1053,7 @@ function viewPortfolios() {
     const box = $('#cmpbox'), open = box.hidden; box.hidden = !open; e.currentTarget.setAttribute('aria-expanded', String(open));
     if (!open) return;
     const ts = [...new Set([10, 12, 15, 18, 20, 25, target()])].sort((a, b) => a - b);
-    const callAt = (r, t) => { if (!r.s) return 'NOT ANALYSED'; const x = signalAt(r.s, t); const keep = pickPrefs.tgt; pickPrefs.tgt = t; const c = holdCall({ ...r.s, signal: x.signal, horizon: x.horizon }, r.w); pickPrefs.tgt = keep; return c; };
+    const callAt = (r, t) => { if (!r.s) return 'NOT ANALYSED'; const x = signalAt(r.s, t); const keep = pickPrefs.tgt; pickPrefs.tgt = t; const c = holdCall({ ...r.s, ...x }, r.w); pickPrefs.tgt = keep; return c; };
     const rows = st.rows.slice().sort((a, b) => b.val - a.val);
     const changes = rows.filter(r => new Set(ts.map(t => callAt(r, t))).size > 1).length;
     box.innerHTML = `<p class="hint" style="margin-top:10px">Each holding's call if your target were each of these. ${changes} of ${rows.length} holdings change call somewhere in this range; the rest don't depend on the target.</p>
