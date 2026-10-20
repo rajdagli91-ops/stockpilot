@@ -1,0 +1,12 @@
+Traceback (most recent call last):
+  File "/home/runner/work/stockpilot/stockpilot/stockpilot/research/kronos_test.py", line 152, in <module>
+    summarize()
+  File "/home/runner/work/stockpilot/stockpilot/stockpilot/research/kronos_test.py", line 110, in summarize
+    df = pd.concat([pd.read_csv(f) for f in glob.glob("predictions_*.csv")], ignore_index=True)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/pandas/core/reshape/concat.py", line 407, in concat
+    objs, keys, ndims = _clean_keys_and_objs(objs, keys)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/hostedtoolcache/Python/3.11.17/x64/lib/python3.11/site-packages/pandas/core/reshape/concat.py", line 808, in _clean_keys_and_objs
+    raise ValueError("No objects to concatenate")
+ValueError: No objects to concatenate
