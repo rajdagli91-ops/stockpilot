@@ -84,7 +84,9 @@ def run(name, data, bench, vix, start=TEST_START):
             sc = S.score_stock({}, t, [], [], None, s)
             e = sc.get("entry") or {}
             c = d["Close"]
-            rows.append({"date": str(a.date()), "sym": s, "tech": sc.get("technical"), "entry": e.get("score"),
+            chk = {"f_" + c["k"]: c["s"] for c in (e.get("checks") or [])}
+            chk.update({"x_" + c["k"]: c.get("x") for c in (e.get("checks") or [])})
+            rows.append({**chk, "date": str(a.date()), "sym": s, "tech": sc.get("technical"), "entry": e.get("score"),
                          "hold": (e.get("hold") or {}).get("score"),
                          "mom": float(c.iloc[i - 21] / c.iloc[i - 252] - 1), "rev": float(-(c.iloc[i] / c.iloc[i - 5] - 1)),
                          "act10": float(c.iloc[i + 10] / c.iloc[i] - 1), "act21": float(c.iloc[i + 21] / c.iloc[i] - 1),
@@ -126,6 +128,14 @@ def run(name, data, bench, vix, start=TEST_START):
         hres["hold_weak_lt35_avg_return"] = round(float(p["weak"].mean()), 4)
         hres["hold_strong_ge50_avg_return"] = round(float(p["strong"].mean()), 4)
         hres["market_avg_return_by_regime"] = {k: round(float(v), 4) for k, v in p.groupby("regime")["all"].mean().items()}
+        # each entry factor (f_) and each hold factor (x_) on its own: does a higher score lead to better returns?
+        fac = {}
+        for col in [c for c in df.columns if c.startswith(("f_", "x_"))]:
+            ics = [spearman(g[col], g[f"act{hz}"]) for _, g in df.dropna(subset=[col]).groupby("date") if g[col].nunique() > 2 and len(g) > 10]
+            ics = [x for x in ics if x == x]
+            if len(ics) >= 10:
+                fac[col] = {"mean_ic": round(float(np.mean(ics)), 4), "t": round(float(np.mean(ics) / (np.std(ics) / np.sqrt(len(ics)))), 2), "n": len(ics)}
+        hres["factors"] = fac
         out["horizons"][str(hz)] = hres
     return out
 
