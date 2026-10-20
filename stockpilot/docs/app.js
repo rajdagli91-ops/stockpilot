@@ -674,8 +674,10 @@ function viewPicks() {
       <div class="tbox"><table><thead><tr><th>Stock</th><th class="num">Score</th><th class="num">Entry</th><th class="num">Price</th><th class="num">Buy zone</th><th class="hide-sm">Why wait</th></tr></thead><tbody id="waitb">
       ${wait.map(x => { const e = typeof x.entry === 'object' ? x.entry : null; return `<tr class="click" data-s="${esc(x.symbol)}"><td><b>${esc(x.symbol)}</b><div class="muted" style="font-size:12px">${esc((x.name || '').slice(0, 28))}${x.cap ? ' · ' + esc(x.cap) : ''}</div></td><td class="num">${Math.round(x.overall)}</td><td class="num">${x._e ?? (e ? e.score : x.entry) ?? '—'}</td><td class="num">${n(x.price, f0)}</td><td class="num" data-zone>${e?.zone ? n(e.zone[0], f0) + '–' + n(e.zone[1], f0) : '…'}</td><td class="hide-sm" data-why data-nb="${esc(x._nb || '')}" style="white-space:normal;min-width:200px">${esc([x._nb, ...(e?.why || [])].filter(Boolean).join('; '))}</td></tr>`; }).join('')}</tbody></table></div></div>` : ''}
     ${IPOS.filter(x => x.call === 'APPLY').length ? `<div class="card"><div class="cardhead"><h2>IPOs worth applying for</h2><a href="#ipos">All IPOs →</a></div><div class="syms">${IPOS.filter(x => x.call === 'APPLY').map(x => `<a href="#ipos">${esc(x.name)} · ${x.score}</a>`).join('')}</div></div>` : ''}
-    <div class="card"><div class="cardhead"><h2>Your portfolio today: ${esc(pf?.name || '')}</h2><a href="#portfolios">Open portfolio →</a></div>${pf ? reportHtml(pf, true) : ''}</div>`;
+    <div class="card"><div class="cardhead"><h2>Your portfolio today: ${esc(pf?.name || '')}</h2><a href="#portfolios">Open portfolio →</a></div>${pf ? reportHtml(pf, true) : ''}</div>
+    <div class="card" id="trackcard"><div class="cardhead"><h2>Track record: are the picks actually working?</h2><span class="hint">Graded honestly, from saved weekly snapshots</span></div><div id="trackbody" class="muted">Loading…</div></div>`;
   wireSync(v);
+  renderTrack();
   v.querySelectorAll('#waitb tr[data-s]').forEach(tr => tr.addEventListener('click', () => { location.hash = 'stock/' + encodeURIComponent(tr.dataset.s); }));
   wireClaude(v, async sym => stockPrompt(await loadDetail(sym) || BY.get(sym)));
   const tg = $('#ptgt');
@@ -1194,6 +1196,43 @@ async function reportPdf(r, p) {
     doc.text(t('Score = overall model score (0-100). Hold = hold score (0-100, higher = keep holding).'), M, 823);
     doc.text(`Page ${i} of ${pages}`, W - M, 823, { align: 'right' }); }
   doc.save(t(`StockPilot ${p.name} ${r.slot} ${r.time.slice(0, 16)}`).replace(/[^A-Za-z0-9 _-]+/g, '').replace(/\s+/g, '_') + '.pdf');
+}
+
+// ---- forward track record (engine/track.py saves a weekly snapshot; graded here against the Nifty and holding everything)
+async function renderTrack() {
+  const box = $('#trackbody'); if (!box) return;
+  let tr = null;
+  try { const r = await fetch('data/track.json?t=' + Date.now(), { cache: 'no-cache' }); if (r.ok) tr = await r.json(); } catch { }
+  const snaps = tr?.snaps || [];
+  if (!snaps.length) { box.textContent = 'Starts with the next morning scan: each week the picks and all prices are saved, then graded after 1, 3 and 6 months.'; return; }
+  // today's prices act as the latest snapshot
+  const nowPx = Object.fromEntries(ROWS.filter(r => r.price).map(r => [r.symbol, r.price]));
+  const nowN = (MARKET.markets || []).find(m => m.key === 'nifty')?.last;
+  const today = (META.updated || '').slice(0, 10) || new Date().toISOString().slice(0, 10);
+  const all = [...snaps, { date: today, nifty: nowN, px: nowPx, now: true }];
+  const days = (a, b) => (new Date(b) - new Date(a)) / 864e5;
+  const avgRet = (syms, a, b) => { const v = syms.map(s => a.px[s] && b.px[s] ? b.px[s] / a.px[s] - 1 : null).filter(x => x != null); return v.length ? v.reduce((x, y) => x + y, 0) / v.length : null; };
+  const cap = pickPrefs.cap || 'All';
+  const H = [['1 month', 28], ['3 months', 89], ['6 months', 180]];
+  const out = H.map(([label, h]) => {
+    const g = [];
+    for (const s of snaps) {
+      const e = all.find(x => days(s.date, x.date) >= h); if (!e) continue;
+      const picks = (s.picks?.[cap] || []), common = Object.keys(s.px).filter(k => e.px[k]);
+      const pr = avgRet(picks, s, e), ew = avgRet(common, s, e), n = s.nifty && e.nifty ? e.nifty / s.nifty - 1 : null;
+      g.push({ pr, ew, n, buy: avgRet(s.buy || [], s, e), sell: avgRet(s.sell || [], s, e), hit: picks.length ? picks.filter(k => s.px[k] && e.px[k] && (e.px[k] / s.px[k] - 1) > (n ?? 0)).length / picks.length : null });
+    }
+    const m = k => { const v = g.map(x => x[k]).filter(x => x != null); return v.length ? v.reduce((a, b) => a + b, 0) / v.length * 100 : null; };
+    const due = new Date(new Date(snaps[0].date).getTime() + h * 864e5).toISOString().slice(0, 10);
+    return { label, n: g.length, pr: m('pr'), nifty: m('n'), ew: m('ew'), buy: m('buy'), sell: m('sell'), hit: m('hit'), beat: g.filter(x => x.pr != null && x.n != null && x.pr > x.n).length, due };
+  });
+  const cell = v => v == null ? '—' : `<span class="${v >= 0 ? 'pos' : 'neg'}">${pc(v, 1)}</span>`;
+  box.classList.remove('muted');
+  box.innerHTML = `<p class="hint">Since ${esc(tr.start)} · ${snaps.length} weekly snapshot${snaps.length > 1 ? 's' : ''} · showing ${esc(cap === 'All' ? 'all caps' : cap + ' cap')} picks (change with the cap filter above). Average return per snapshot, from the price on the day of the pick.</p>
+    <div class="tbox"><table><thead><tr><th>After</th><th class="num">Graded</th><th class="num">Top picks</th><th class="num">Nifty</th><th class="num hide-sm">Hold everything</th><th class="num hide-sm">BUY-rated</th><th class="num hide-sm">SELL-rated</th><th class="num">Picks beat Nifty</th></tr></thead><tbody>
+    ${out.map(o => o.n ? `<tr><td>${o.label}</td><td class="num">${o.n}</td><td class="num">${cell(o.pr)}</td><td class="num">${cell(o.nifty)}</td><td class="num hide-sm">${cell(o.ew)}</td><td class="num hide-sm">${cell(o.buy)}</td><td class="num hide-sm">${cell(o.sell)}</td><td class="num">${o.beat}/${o.n} weeks · ${o.hit != null ? Math.round(o.hit) + '% of picks' : '—'}</td></tr>`
+      : `<tr><td>${o.label}</td><td class="num muted" colspan="7">First grade due ${esc(o.due)}</td></tr>`).join('')}</tbody></table></div>
+    <p class="hint">What would count as working, decided in advance: over 6–12 months, top picks beat the Nifty and "hold everything" on average, and BUY-rated stocks beat SELL-rated ones. A few weeks prove nothing either way; the system is only changed at the 6- and 12-month reviews.</p>`;
 }
 
 // ---- Aladdin-style risk: sensitivities from 2 years of weekly returns (engine/risk.py), applied to your weights

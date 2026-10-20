@@ -30,6 +30,7 @@ from engine.providers import global_mkts
 from engine.providers import news as news_p
 from engine.providers import commodity
 from engine import risk as risk_mod
+from engine import track as track_mod
 from engine.providers import resolve as resolver
 from engine.providers import yahoo
 
@@ -600,6 +601,13 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
 
     assign_caps(rows)
     picks, wait = choose_picks(rows, details)
+    if mode == "full" and not sample:  # weekly snapshot for the forward track record (graded later on the site)
+        try:
+            nclose = float(bench["Close"].iloc[-1]) if bench is not None and len(bench) else None
+            jsave(OUT / "track.json", track_mod.snapshot(jload(OUT / "track.json", {}), rows, nclose,
+                                                         dt.datetime.now(IST).date(), S["target_cagr"], SCAN["min_traded_cr"]))
+        except Exception:
+            traceback.print_exc()
     ipos = []
     if mode in ("full", "quick"):
         try:
