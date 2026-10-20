@@ -29,7 +29,7 @@ NIFTY50 = ["ADANIENT", "ADANIPORTS", "APOLLOHOSP", "ASIANPAINT", "AXISBANK", "BA
 TEST_START = os.environ.get("TEST_START", "2025-09-01")
 CTX, PRED, STEP = 400, 21, 10
 MODEL = os.environ.get("KRONOS_MODEL", "NeoQuasar/Kronos-small")
-SAMPLES = int(os.environ.get("SAMPLES", "5"))
+SAMPLES = int(os.environ.get("SAMPLES", "1"))
 COST = 0.004  # round trip: brokerage + STT + slippage, conservative for large caps
 
 
@@ -53,14 +53,14 @@ def spearman(a, b):
     return float(np.corrcoef(a, b)[0, 1]) if a.std() > 0 and b.std() > 0 else np.nan
 
 
-def main():
+def shard(k, n):
     t0 = time.time()
     data = load()
     print(f"loaded {len(data)} stocks")
     cal = sorted(set().union(*[set(d.index) for d in data.values()]))
     cal = pd.DatetimeIndex(cal)
     start_i = cal.searchsorted(pd.Timestamp(TEST_START))
-    anchors = [cal[i] for i in range(start_i, len(cal) - PRED, STEP)]
+    anchors = [cal[i] for i in range(start_i, len(cal) - PRED, STEP)][k::n]
     print(f"{len(anchors)} anchors from {anchors[0].date()} to {anchors[-1].date()}")
 
     tok = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-base")
@@ -68,7 +68,7 @@ def main():
     pred = KronosPredictor(mdl, tok, device="cpu", max_context=512)
 
     rows = []
-    for k, a in enumerate(anchors):
+    for a in anchors:
         dfs, xts, yts, syms, last, fut, feats = [], [], [], [], [], [], []
         for s, d in data.items():
             if a not in d.index:
@@ -99,9 +99,15 @@ def main():
             r["act_range"] = float(((nxt["high"] - nxt["low"]) / nxt["close"]).mean())
             r["past_range"] = float(((dfs[syms.index(s)]["high"] - dfs[syms.index(s)]["low"]) / dfs[syms.index(s)]["close"]).iloc[-21:].mean())
             rows.append(r)
-        print(f"anchor {k + 1}/{len(anchors)} {a.date()} done, {time.time() - t0:.0f}s")
+        pd.DataFrame(rows).to_csv(f"predictions_{k}.csv", index=False)  # saved after every date
+        print(f"shard {k}: date {a.date()} done, {time.time() - t0:.0f}s", flush=True)
 
-    df = pd.DataFrame(rows)
+
+
+def summarize():
+    import glob
+    t0 = time.time()
+    df = pd.concat([pd.read_csv(f) for f in glob.glob("predictions_*.csv")], ignore_index=True)
     df.to_csv("predictions.csv", index=False)
     res = {"model": MODEL, "samples": SAMPLES, "stocks": int(df["sym"].nunique()), "anchors": int(df["date"].nunique()),
            "period": [df["date"].min(), df["date"].max()], "predictions": len(df), "cost_round_trip": COST, "horizons": {}}
@@ -142,4 +148,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1] == "summarize":
+        summarize()
+    else:
+        shard(int(sys.argv[1]), int(sys.argv[2]))

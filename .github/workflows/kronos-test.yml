@@ -7,13 +7,17 @@ on:
         default: "NeoQuasar/Kronos-small"
       samples:
         description: "forecast paths averaged per stock"
-        default: "5"
+        default: "1"
 permissions:
   contents: write
 jobs:
-  test:
+  shard:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        k: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -23,19 +27,49 @@ jobs:
           git clone -q --depth 1 https://github.com/shiyu-coder/Kronos.git /tmp/Kronos
           pip install -q torch --index-url https://download.pytorch.org/whl/cpu
           pip install -q "numpy<2.3" pandas yfinance einops==0.8.1 huggingface_hub==0.33.1 safetensors tqdm
-      - name: Run backtest
+      - name: Forecast this shard
         env:
           KRONOS_DIR: /tmp/Kronos
           KRONOS_MODEL: ${{ inputs.model }}
           SAMPLES: ${{ inputs.samples }}
         run: |
           mkdir -p /tmp/out && cd /tmp/out
-          python ${{ github.workspace }}/stockpilot/research/kronos_test.py 2>&1 | tee log.txt
-      - name: Save results (research branch)
+          python -u ${{ github.workspace }}/stockpilot/research/kronos_test.py ${{ matrix.k }} 6 2>&1 | tee log_${{ matrix.k }}.txt
+      - name: Save shard (even if stopped)
         if: always()
         run: |
           cd /tmp/out
+          git init -q && git checkout -q -b research-k${{ matrix.k }}
+          git add -A
+          git -c user.name=stockpilot-bot -c user.email=stockpilot-bot@users.noreply.github.com commit -qm "kronos shard ${{ matrix.k }}" || true
+          git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" research-k${{ matrix.k }}
+  summarize:
+    needs: shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - name: Combine shards and score
+        env:
+          KRONOS_MODEL: ${{ inputs.model }}
+          SAMPLES: ${{ inputs.samples }}
+        run: |
+          pip install -q "numpy<2.3" pandas yfinance
+          mkdir -p /tmp/out && cd /tmp/out
+          for k in 0 1 2 3 4 5; do
+            git fetch -q --depth 1 "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" research-k$k && git --work-tree=. checkout FETCH_HEAD -- . 2>/dev/null || true
+          done || true
+          ls
+          # model import is only needed for forecasting: stub it for the summary step
+          mkdir -p stub/model && echo "Kronos = KronosPredictor = KronosTokenizer = None" > stub/model/__init__.py
+          KRONOS_DIR=$PWD/stub python -u ${{ github.workspace }}/stockpilot/research/kronos_test.py summarize 2>&1 | tee log.txt
+      - name: Save results
+        if: always()
+        run: |
+          cd /tmp/out && rm -rf stub .git
           git init -q && git checkout -q -b research
           git add -A
-          git -c user.name=stockpilot-bot -c user.email=stockpilot-bot@users.noreply.github.com commit -qm "kronos test $(date -u +%F_%H%M)"
+          git -c user.name=stockpilot-bot -c user.email=stockpilot-bot@users.noreply.github.com commit -qm "kronos results"
           git push -qf "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}" research
