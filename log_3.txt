@@ -1,0 +1,6 @@
+loaded 50 stocks
+4 anchors from 2025-10-14 to 2026-07-09
+shard 3: date 2025-10-14 done, 422s
+shard 3: date 2026-01-09 done, 840s
+shard 3: date 2026-04-10 done, 1256s
+shard 3: date 2026-07-09 done, 1671s
