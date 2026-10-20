@@ -73,7 +73,7 @@ function holdCall(s, w = 0) {
     if (s.horizon?.term === 'Short term') return 'SHORT-TERM TRADE';
     return e != null && e < (META.scan?.min_entry_score ?? 55) ? 'HOLD (add on dip)' : 'ADD MORE';
   }
-  if (s.expected_return != null && s.expected_return < 12) return 'HOLD / REVIEW';
+  if (s.expected_return != null && s.expected_return < Math.min(12, target())) return 'HOLD / REVIEW';
   if (h?.broken && hs < 50) return 'HOLD (watch)';  // keep, but the price trend has broken
   return 'HOLD';
 }
@@ -184,6 +184,7 @@ async function loadData(bust = false) {
   IPOS = (i?.ipos || []).filter(x => !x.close || String(x.close).slice(0, 10) >= todayIST)
     .map(x => ({ ...x, status: x.open && String(x.open).slice(0, 10) > todayIST ? 'Upcoming' : x.open ? 'Open' : x.status }));
   BY = new Map(ROWS.map(r => [r.symbol, r]));
+  applyTarget();
   detailCache.clear();
   if (applyResolved()) toast('Found the stocks you added on NSE / BSE and loaded their data.');
   $('#updated').textContent = META.updated ? 'Data ' + META.updated : '';
@@ -193,10 +194,43 @@ async function loadData(bust = false) {
   else b.innerHTML = '';
 }
 async function loadDetail(sym) {
-  if (detailCache.has(sym)) return detailCache.get(sym);
+  if (detailCache.has(sym)) return syncDetail(detailCache.get(sym));
   const r = await fetch(fileOf(sym), { cache: 'no-cache' });
   if (!r.ok) return null;
-  const d = await r.json(); detailCache.set(sym, d); return d;
+  const d = await r.json(); detailCache.set(sym, d); return syncDetail(d);
+}
+// ---- the BUY / HOLD / SELL rating at YOUR target return, recomputed here (same rule as engine/scoring.py)
+// The engine rates against the target saved on GitHub; only the "expected return >= target" test depends on the
+// target, so the rating for any other target can be worked out from the engine's numbers without a new scan.
+const savedTarget = () => META.horizons?.long_term_min_cagr ?? META.target_cagr ?? 20;
+function signalAt(r, tgt) {
+  const sig0 = r._sig0 ?? r.signal, hz0 = r._hz0 ?? r.horizon;
+  if (!sig0 || sig0 === 'SCAN' || sig0 === 'NO DATA' || (r.stage || 0) < 2) return { signal: sig0, horizon: hz0 };
+  if (tgt === savedTarget()) return { signal: sig0, horizon: hz0 };
+  const er = r.expected_return, ov = r.overall ?? 0, fund = r.fundamental ?? 0;
+  // red flag: from news, or a SELL that can't be explained by a weak score or weak return
+  const red = (r.nw?.flags > 0) || (sig0 === 'SELL' && ov >= (META.thresholds?.sell ?? 45) && (er ?? 0) >= 12);
+  const longOk = ov >= (META.thresholds?.buy ?? 66) && er != null && er >= tgt && fund >= 55 && !red;
+  const shortBuy = sig0 === 'BUY' && hz0?.term === 'Short term';
+  if (longOk) return { signal: 'BUY', horizon: { term: 'Long term', period: '3+ years', expected: er, note: `Expected ~${Math.round(er)}%/yr, meets your ${tgt}% target. Review after each quarterly result.` } };
+  if (shortBuy) return { signal: 'BUY', horizon: hz0 };
+  if (sig0 === 'SELL') return { signal: 'SELL', horizon: hz0 };
+  return { signal: 'HOLD', horizon: er != null && er >= tgt ? { term: 'Long term', period: 'hold 3+ years', expected: er, note: "Business is on track for your target; the price/trend isn't ready for fresh buying." }
+    : { term: 'Review', period: 'in 3–6 months', expected: er, note: `Expected return ${er != null ? '~' + Math.round(er) + '%/yr' : 'unclear'} is below your ${tgt}% target. Re-check after next results.` } };
+}
+function applyTarget() {
+  const t = target();
+  for (const r of ROWS) { if (r._sig0 === undefined) { r._sig0 = r.signal; r._hz0 = r.horizon; } const x = signalAt(r, t); r.signal = x.signal; r.horizon = x.horizon; }
+  for (const d of detailCache.values()) syncDetail(d);
+  _held = null;
+}
+function syncDetail(d) { const r = d && BY.get(d.symbol); if (r) { d.signal = r.signal; d.horizon = r.horizon; } return d; }
+let tgtSaveTimer = null;
+function setTarget(t, redraw) {
+  pickPrefs.tgt = t; LS.set('pickPrefs', pickPrefs); applyTarget(); redraw && redraw();
+  // the target you settle on also goes to GitHub, so scheduled reports use it (after a few seconds of no changes)
+  clearTimeout(tgtSaveTimer);
+  if (ghReady() && t !== savedTarget()) tgtSaveTimer = setTimeout(() => saveTargetDefault(t, true), 8000);
 }
 
 // ================================================================ GitHub: fetch now / analyse / sync
@@ -641,15 +675,15 @@ function pickCard(x, d, i) {
     ${d ? newsHtml(d) : ''}
     ${claudeBox(x.symbol)}`;
 }
-async function saveTargetDefault(t) {
-  if (!ghReady()) { toast('Set up GitHub in Settings first.'); location.hash = 'settings'; return; }
+async function saveTargetDefault(t, quiet = false) {
+  if (!ghReady()) { if (!quiet) { toast('Set up GitHub in Settings first.'); location.hash = 'settings'; } return; }
   for (const path of ['/contents/stockpilot/config/settings.json', '/contents/config/settings.json']) {
     let f; try { f = await gh(path); } catch { continue; }
     try {
       const j = JSON.parse(b64utf8(f.content));
       j.target_cagr = t; j.horizons = { ...(j.horizons || {}), long_term_min_cagr: t, long_term_good_cagr: t + 3 };
       await gh(path, { method: 'PUT', body: JSON.stringify({ message: `Set target return to ${t}%/yr`, content: utf8b64(JSON.stringify(j, null, 2) + '\n'), sha: f.sha }) });
-      toast(`Saved: scheduled scans will rate stocks against ${t}%/yr from the next run.`); return;
+      toast(`Target ${t}%/yr saved: scheduled reports will use it from the next run.`); return;
     } catch (e) { toast('Could not save: ' + e.message); return; }
   }
   toast('Could not find config/settings.json in your repository.');
@@ -685,7 +719,7 @@ function viewPicks() {
   v.querySelectorAll('#waitb tr[data-s]').forEach(tr => tr.addEventListener('click', () => { location.hash = 'stock/' + encodeURIComponent(tr.dataset.s); }));
   wireClaude(v, async sym => stockPrompt(await loadDetail(sym) || BY.get(sym)));
   const tg = $('#ptgt');
-  tg.addEventListener('change', () => { const t = Math.max(5, Math.min(60, Math.round(+tg.value || 0))); pickPrefs.tgt = t; LS.set('pickPrefs', pickPrefs); viewPicks(); });
+  tg.addEventListener('change', () => { const t = Math.max(5, Math.min(60, Math.round(+tg.value || 0))); setTarget(t, viewPicks); });
   $('#pcap').addEventListener('click', e => { const b = e.target.closest('button[data-cap]'); if (!b) return; pickPrefs.cap = b.dataset.cap; LS.set('pickPrefs', pickPrefs); viewPicks(); });
   $('#ptgtsave').addEventListener('click', () => saveTargetDefault(target()));
   wireEntryFactors(v, viewPicks);
@@ -981,6 +1015,9 @@ function viewPortfolios() {
       <div id="unmatched">${pendingHtml(p)}</div>
     </div>
     ${entryFactorsHtml()}
+    <div class="card pftgt"><div class="row" style="align-items:center;gap:12px"><label class="tgt" style="flex:none">Target return <input id="pftgt" type="number" min="5" max="60" step="1" value="${target()}" style="width:72px" aria-label="Target return per year"> %/yr</label>
+      <span class="hint" style="flex:1 1 240px">Change it and every call below is re-worked at once for that target. ${target() === savedTarget() ? 'Same as the target the scheduled reports use.' : `Scheduled reports still use ${savedTarget()}% until this is saved${ghReady() ? ' (it saves itself in a few seconds)' : ' (set up GitHub in Settings to save it)'}.`}</span>
+      <button class="btn ghost small" id="cmpbtn" aria-expanded="false">Compare calls at other targets ▾</button></div><div id="cmpbox" hidden></div></div>
     <div class="tbox"><table id="pt"><thead><tr>
       ${[['symbol', 'Stock'], ['action', 'Your call'], ['hold', 'Hold score'], ['score', 'Model score', 'hide-sm'], ['qty', 'Qty', 'num hide-sm'], ['avg', 'Avg ₹', 'num hide-sm'], ['px', 'Price ₹', 'num hide-sm'], ['val', 'Value', 'num'], ['w', 'Weight', 'num'], ['er', 'Exp. ret', 'num hide-sm'], ['gainp', 'Gain %', 'num'], ['', '']]
         .map(([k, l, c]) => `<th class="${k ? 'sort' : ''} ${c || ''}" data-k="${k}" aria-sort="${pfSort.key === k ? (pfSort.dir < 0 ? 'descending' : 'ascending') : 'none'}">${l}</th>`).join('')}
@@ -998,6 +1035,18 @@ function viewPortfolios() {
     : '<tr><td colspan="12" class="empty">No holdings yet. Add one above or upload your broker file.</td></tr>';
 
   wireSync(v); wireEntryFactors(v, viewPortfolios); wirePending(p);
+  $('#pftgt').addEventListener('change', e => { const t = Math.max(5, Math.min(60, Math.round(+e.target.value || 0))); setTarget(t, viewPortfolios); });
+  $('#cmpbtn').addEventListener('click', e => {
+    const box = $('#cmpbox'), open = box.hidden; box.hidden = !open; e.currentTarget.setAttribute('aria-expanded', String(open));
+    if (!open) return;
+    const ts = [...new Set([10, 12, 15, 18, 20, 25, target()])].sort((a, b) => a - b);
+    const callAt = (r, t) => { if (!r.s) return 'NOT ANALYSED'; const x = signalAt(r.s, t); const keep = pickPrefs.tgt; pickPrefs.tgt = t; const c = holdCall({ ...r.s, signal: x.signal, horizon: x.horizon }, r.w); pickPrefs.tgt = keep; return c; };
+    const rows = st.rows.slice().sort((a, b) => b.val - a.val);
+    const changes = rows.filter(r => new Set(ts.map(t => callAt(r, t))).size > 1).length;
+    box.innerHTML = `<p class="hint" style="margin-top:10px">Each holding's call if your target were each of these. ${changes} of ${rows.length} holdings change call somewhere in this range; the rest don't depend on the target.</p>
+      <div class="tbox"><table><thead><tr><th>Stock</th><th class="num">Exp. return</th>${ts.map(t => `<th class="${t === target() ? 'on' : ''}">${t}%${t === target() ? ' (now)' : ''}</th>`).join('')}</tr></thead><tbody>
+      ${rows.map(r => `<tr><td><b>${esc(isPlaceholder(r.symbol) ? (r.raw || '') : r.symbol.replace(/\.BO$/, ''))}</b></td><td class="num">${pc(r.s?.expected_return)}</td>${ts.map(t => `<td>${pill(callAt(r, t))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  });
   $('#csave').addEventListener('click', () => cloudSave());
   $('#cload').addEventListener('click', async () => { if (!cloudReady()) { toast('Set GitHub and a passphrase in Settings first.'); return; } if (await cloudLoad(true)) { toast('Loaded portfolios from cloud.'); viewPortfolios(); } });
   renderReports();
