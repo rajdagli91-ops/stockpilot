@@ -2,10 +2,19 @@ name: Update scores
 
 on:
   schedule:
-    # GitHub can start scheduled runs 10-30 min late, so each is set early.
-    - cron: "45 1 * * 1-5"   # 07:15 IST  Pre-market: full market scan, report by ~08:45
-    - cron: "15 7 * * 1-5"   # 12:45 IST  1 PM update
-    - cron: "15 9 * * 1-5"   # 14:45 IST  3 PM update
+    # GitHub's free schedules can start hours late or be skipped, especially on the hour. So each slot has
+    # several tries at odd minutes; the first one that runs does the work, later ones see it is done and stop.
+    - cron: "7 0 * * 1-5"    # 05:37 IST  Pre-market, try 1
+    - cron: "41 0 * * 1-5"   # 06:11 IST  Pre-market, try 2
+    - cron: "13 1 * * 1-5"   # 06:43 IST  Pre-market, try 3
+    - cron: "47 1 * * 1-5"   # 07:17 IST  Pre-market, try 4
+    - cron: "19 2 * * 1-5"   # 07:49 IST  Pre-market, try 5
+    - cron: "23 6 * * 1-5"   # 11:53 IST  1 PM, try 1
+    - cron: "53 6 * * 1-5"   # 12:23 IST  1 PM, try 2
+    - cron: "21 7 * * 1-5"   # 12:51 IST  1 PM, try 3
+    - cron: "17 8 * * 1-5"   # 13:47 IST  3 PM, try 1
+    - cron: "49 8 * * 1-5"   # 14:19 IST  3 PM, try 2
+    - cron: "19 9 * * 1-5"   # 14:49 IST  3 PM, try 3
   workflow_dispatch:
     inputs:
       mode:
@@ -79,24 +88,38 @@ jobs:
 
       - name: Choose mode
         id: m
+        working-directory: ${{ steps.p.outputs.dir }}
         env:
           SYMS: ${{ github.event.inputs.symbols }}
           MODE: ${{ github.event.inputs.mode }}
         run: |
           SYMS=$(printf '%s' "$SYMS" | tr -cd 'A-Za-z0-9&. -')
           case "$MODE" in full|quick|portfolio|symbols) ;; *) MODE=portfolio ;; esac
-          case "${{ github.event.schedule }}" in
-            "45 1 * * 1-5") echo "args=full --slot Pre-market" >> $GITHUB_OUTPUT ;;
-            "15 7 * * 1-5") echo "args=quick --slot '1 PM'" >> $GITHUB_OUTPUT ;;
-            "15 9 * * 1-5") echo "args=quick --slot '3 PM'" >> $GITHUB_OUTPUT ;;
-            *) echo "args=$MODE $SYMS" >> $GITHUB_OUTPUT ;;
+          SCHED="${{ github.event.schedule }}"
+          SLOT=""; ARGS="$MODE $SYMS"
+          case "$SCHED" in
+            "7 0 * * 1-5"|"41 0 * * 1-5"|"13 1 * * 1-5"|"47 1 * * 1-5"|"19 2 * * 1-5") SLOT="Pre-market"; ARGS="full --slot Pre-market" ;;
+            "23 6 * * 1-5"|"53 6 * * 1-5"|"21 7 * * 1-5") SLOT="1 PM"; ARGS="quick --slot '1 PM'" ;;
+            "17 8 * * 1-5"|"49 8 * * 1-5"|"19 9 * * 1-5") SLOT="3 PM"; ARGS="quick --slot '3 PM'" ;;
           esac
+          SKIP=false
+          if [ -n "$SLOT" ]; then
+            TODAY=$(TZ=Asia/Kolkata date +%F)
+            # a later slot that starts very late is pointless once the next one is due; the 1 PM run also covers 3 PM if late
+            if python3 -c "import json,sys; d=json.load(open('docs/data/slots.json')); sys.exit(0 if sys.argv[2] in d.get(sys.argv[1], []) else 1)" "$TODAY" "$SLOT" 2>/dev/null; then
+              SKIP=true; echo "$SLOT already ran today: nothing to do"
+            fi
+          fi
+          echo "args=$ARGS" >> $GITHUB_OUTPUT
+          echo "skip=$SKIP" >> $GITHUB_OUTPUT
 
       - name: Fetch data, score, report
+        if: steps.m.outputs.skip != 'true'
         working-directory: ${{ steps.p.outputs.dir }}
         run: eval python -m engine.run ${{ steps.m.outputs.args }}
 
       - name: Save results (data branch, single commit, no history growth)
+        if: steps.m.outputs.skip != 'true'
         working-directory: ${{ steps.p.outputs.dir }}
         run: |
           cd docs/data
@@ -107,6 +130,7 @@ jobs:
           rm -rf .git
 
       - name: Keep NSE list cache
+        if: steps.m.outputs.skip != 'true'
         working-directory: ${{ steps.p.outputs.dir }}
         run: |
           git add config/universe_cache.csv config/sectors.csv 2>/dev/null || true
@@ -116,12 +140,16 @@ jobs:
           fi
 
       - name: Make browsers load the new site code (cache-busting)
+        if: steps.m.outputs.skip != 'true'
         working-directory: ${{ steps.p.outputs.dir }}
         run: sed -i -E "s/(app\.js|style\.css)(\?v=[0-9]+)?\"/\1?v=${GITHUB_RUN_ID}\"/g" docs/index.html
 
       - uses: actions/configure-pages@v5
+        if: steps.m.outputs.skip != 'true'
       - uses: actions/upload-pages-artifact@v3
+        if: steps.m.outputs.skip != 'true'
         with:
           path: ${{ steps.p.outputs.dir }}/docs
       - id: deploy
+        if: steps.m.outputs.skip != 'true'
         uses: actions/deploy-pages@v4

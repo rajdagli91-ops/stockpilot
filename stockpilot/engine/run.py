@@ -640,6 +640,11 @@ def main(mode="quick", symbols=None, slot=None, prov=yahoo, newsp=news_p, bsep=b
     })
     if mode == "full":
         meta["last_full_scan"] = meta["updated"]
+    if slot:  # lets the extra scheduled tries know this slot is done for today
+        sl = jload(OUT / "slots.json", {})
+        day = dt.datetime.now(IST).date().isoformat()
+        sl[day] = sorted(set(sl.get(day, []) + [slot]))
+        jsave(OUT / "slots.json", {k: v for k, v in sl.items() if k >= (dt.datetime.now(IST).date() - dt.timedelta(days=7)).isoformat()})
     save_state(rows, meta, picks, wait)
 
     # ---- encrypted portfolio report + delivery

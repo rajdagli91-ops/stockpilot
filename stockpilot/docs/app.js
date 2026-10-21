@@ -1587,4 +1587,18 @@ function signOut() { LS.set('auth', null); settings.pass = ''; saveSettings(); l
   await loadData();
   go();
   pollRun();
+  morningCheck();
 })();
+// GitHub sometimes runs the scheduled morning scan hours late or not at all. If you open the site on a weekday
+// after 8 am and today's full scan is missing (and nothing is running), start it once from here.
+async function morningCheck() {
+  const ist = new Date(Date.now() + 5.5 * 36e5), today = ist.toISOString().slice(0, 10), dow = ist.getUTCDay(), hour = ist.getUTCHours();
+  if (!ghReady() || dow === 0 || dow === 6 || hour < 8) return;
+  if ((META.last_full_scan || '').slice(0, 10) === today || LS.get('autoScan', '') === today) return;
+  try {
+    if ((await activeRuns()).length) return;
+    LS.set('autoScan', today);
+    toast("This morning's scan didn't run on schedule (GitHub delays these sometimes). Starting it now: about 15 minutes.", 9000);
+    dispatch('full');
+  } catch { }
+}
