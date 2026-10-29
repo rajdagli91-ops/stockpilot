@@ -126,7 +126,7 @@ jobs:
       - name: Fetch data, score, report
         if: steps.m.outputs.skip != 'true'
         working-directory: ${{ steps.p.outputs.dir }}
-        run: eval python -m engine.run ${{ steps.m.outputs.args }}
+        run: python -m engine.run ${{ steps.m.outputs.args }}
 
       - name: Save results (data branch, single commit, no history growth)
         if: steps.m.outputs.skip != 'true'
