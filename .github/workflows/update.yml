@@ -26,6 +26,10 @@ on:
         description: "For mode=symbols: space-separated NSE symbols, e.g. INFY TCS"
         required: false
         default: ""
+      slot:
+        description: "Scheduled report this run stands in for (Pre-market, 1 PM, 3 PM); used by the outside alarm clock"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -92,6 +96,7 @@ jobs:
         env:
           SYMS: ${{ github.event.inputs.symbols }}
           MODE: ${{ github.event.inputs.mode }}
+          INSLOT: ${{ github.event.inputs.slot }}
         run: |
           SYMS=$(printf '%s' "$SYMS" | tr -cd 'A-Za-z0-9&. -')
           case "$MODE" in full|quick|portfolio|symbols) ;; *) MODE=portfolio ;; esac
@@ -101,6 +106,11 @@ jobs:
             "7 0 * * 1-5"|"41 0 * * 1-5"|"13 1 * * 1-5"|"47 1 * * 1-5"|"19 2 * * 1-5") SLOT="Pre-market"; ARGS="full --slot Pre-market" ;;
             "23 6 * * 1-5"|"53 6 * * 1-5"|"21 7 * * 1-5") SLOT="1 PM"; ARGS="quick --slot '1 PM'" ;;
             "17 8 * * 1-5"|"49 8 * * 1-5"|"19 9 * * 1-5") SLOT="3 PM"; ARGS="quick --slot '3 PM'" ;;
+          esac
+          case "$INSLOT" in
+            "Pre-market") SLOT="Pre-market"; ARGS="full --slot Pre-market" ;;
+            "1 PM") SLOT="1 PM"; ARGS="quick --slot '1 PM'" ;;
+            "3 PM") SLOT="3 PM"; ARGS="quick --slot '3 PM'" ;;
           esac
           SKIP=false
           if [ -n "$SLOT" ]; then
