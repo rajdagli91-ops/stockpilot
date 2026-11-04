@@ -3,7 +3,7 @@ import re, json
 import requests, yfinance as yf
 UA = {"User-Agent": "Mozilla/5.0 (StockPilot personal research)"}
 out = {}
-for url in ["https://www.allindiabullion.com/", "https://allindiabullion.com/"]:
+for url in ["https://ibjarates.com/", "https://www.ibja.co/"]:
     try:
         r = requests.get(url, headers=UA, timeout=30)
         out[url] = {"status": r.status_code, "len": len(r.text), "final": r.url}
@@ -13,7 +13,6 @@ for url in ["https://www.allindiabullion.com/", "https://allindiabullion.com/"]:
         out[url]["dates"] = sorted(set(re.findall(r"20\d\d-\d\d-\d\d", r.text)))[-10:]
         out[url]["links"] = sorted(set(re.findall(r'(?:href|src)="([^"]+)"', r.text)))[:200]
         out[url]["api"] = sorted(set(re.findall(r'["\'](/?[\w/.-]*(?:api|json|rate|price)[\w/.?=&-]*)["\']', r.text, re.I)))[:80]
-        break
     except Exception as e:
         out[url] = {"error": str(e)}
 g = yf.download("GC=F", period="5d", progress=False)["Close"].iloc[-1].item()
