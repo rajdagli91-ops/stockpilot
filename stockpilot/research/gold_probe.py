@@ -7,7 +7,7 @@ for url in ["https://ibjarates.com/", "https://www.ibja.co/"]:
     try:
         r = requests.get(url, headers=UA, timeout=30)
         out[url] = {"status": r.status_code, "len": len(r.text), "final": r.url}
-        open("aib.html", "w").write(r.text)
+        open(url.split("//")[1].strip("/").replace("/","_") + ".html", "w").write(r.text)
         t = re.sub(r"<[^>]+>", " ", r.text)
         out[url]["gold_hits"] = [m.group(0) for m in re.finditer(r".{0,80}(24K|24 K|999).{0,120}", t)][:15]
         out[url]["dates"] = sorted(set(re.findall(r"20\d\d-\d\d-\d\d", r.text)))[-10:]
