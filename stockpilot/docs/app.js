@@ -1400,7 +1400,7 @@ function mktLast(m, fx) {
   const u = m.unit || MKT_UNIT[m.key] || '';
   if (m.last == null) return '—';
   if (/^US\$/.test(u)) {
-    const inr = !fx ? '' : m.key === 'gold' ? `≈ ₹${n(m.last * fx / 31.1035 * 10, f0)} per 10 g` : m.key === 'copper' ? `≈ ₹${n(m.last * fx * 2.20462, f0)} per kg` : m.key === 'brent' ? `≈ ₹${n(m.last * fx, f0)} per barrel` : '';
+    const inr = !fx ? '' : m.key === 'gold' ? (MARKET.gold?.source === 'IBJA Mumbai' ? `Mumbai ₹${n(MARKET.gold.last, f0)} per 10 g (IBJA)` : `≈ ₹${n(m.last * fx / 31.1035 * 10, f0)} per 10 g`) : m.key === 'copper' ? `≈ ₹${n(m.last * fx * 2.20462, f0)} per kg` : m.key === 'brent' ? `≈ ₹${n(m.last * fx, f0)} per barrel` : '';
     return `$${n(m.last)}<div class="hint">${esc(u)}${inr ? '<br>' + inr : ''}</div>`;
   }
   if (m.key === 'usdinr') return `₹${n(m.last)}<div class="hint">${esc(u)}</div>`;
@@ -1414,23 +1414,26 @@ function crudeHtml(c) {
     <div class="hint">Typical move ${p.median >= 0 ? '+' : ''}${p.median}% · from ${f0.format(p.n)} similar days (${esc(p.matched)}) · any day: ${p.base_up}% up</div></div>`;
   const ch = c.chg || {};
   const tone = t => `<span class="tone" style="background:${t > 0 ? 'var(--buy)' : t < 0 ? 'var(--sell)' : 'var(--nodata)'}"></span>`;
-  const unit = c.inr_unit || 'per barrel', title = c.name === 'Gold' ? 'Gold: trend and range' : 'Crude oil (Brent): trend and range';
+  const unit = c.inr_unit || 'per barrel', title = c.name === 'Gold' ? (c.cur === '₹' ? 'Gold (₹, Mumbai): trend and range' : 'Gold: trend and range') : 'Crude oil (Brent): trend and range';
+  const R = c.cur === '₹', $c = v => R ? '₹' + n(v, f0) : '$' + n(v);
+  const sub = R ? `${esc(c.unit)}${c.session ? ` · ${esc(c.session)} rate` : ''}${c.usd_oz ? `<br>International: $${n(c.usd_oz)} per troy ounce at ₹${n(c.usdinr)}/$${c.source === 'IBJA Mumbai' && c.premium != null ? ` · Mumbai is ${c.premium}% above it (import duty + local premium)` : ''}` : ''}`
+    : `${esc(c.unit)}${c.last_inr ? ` · ≈ ₹${n(c.last_inr, f0)} ${unit} at ₹${n(c.usdinr)}/$` : ''}`;
   return `<div class="card crude"><div class="cardhead"><h2>${title}</h2><span class="hint">Prices to ${esc(c.date)} · updated with each run</span></div>
     <div class="crudetop">
-      <div><div class="big mono">$${n(c.last)}</div><div class="hint">${esc(c.unit)}${c.last_inr ? ` · ≈ ₹${n(c.last_inr, f0)} ${unit} at ₹${n(c.usdinr)}/$` : ''}</div>
+      <div><div class="big mono">${$c(c.last)}</div><div class="hint">${sub}</div>
         <div class="chgs">${[['1 week', ch['1w']], ['1 month', ch['1m']], ['3 months', ch['3m']], ['1 year', ch['1y']]].map(([l, v]) => `<span>${l} <b class="${v >= 0 ? 'pos' : 'neg'}">${pc(v, 1)}</b></span>`).join('')}</div></div>
-      <div style="flex:1 1 320px"><div class="sig"><b>Likely range next month: $${n(c.range_1m[0])}–$${n(c.range_1m[1])}</b></div>
+      <div style="flex:1 1 320px"><div class="sig"><b>Likely range next month: ${$c(c.range_1m[0])}–${$c(c.range_1m[1])}</b></div>
         <div class="hint">${c.range_1m_inr?.[0] ? `≈ ₹${n(c.range_1m_inr[0], f0)}–₹${n(c.range_1m_inr[1], f0)} ${unit} · ` : ''}about a 2 in 3 chance.${c.range_held != null ? ` Checked on the last ${c.years} years: the price ended inside this kind of range ${Math.round(c.range_held * 100)}% of the time (target 68%), so it is a fair guide to how far it may move.` : ''}</div>
         <div class="hint" style="margin-top:8px"><b>No up/down call.</b> ${c.name === 'Gold' ? 'Direction calls are not made for gold either: the same trend-based odds failed for crude, and there is no tested method.' : 'Odds based on the trend were tested on 2014–2026 and were right only 46% of the time (worse than a coin flip), so they are not shown. Nobody reliably predicts oil\'s direction a month ahead.'}</div></div>
     </div>
     <div class="grid2" style="margin-top:12px">
       <div><div class="ph">Trend</div><ul>${c.why.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
-        <div class="hint">50-day avg $${n(c.dma50)} · 200-day avg $${n(c.dma200)} · 52-week $${n(c.lo52)}–$${n(c.hi52)}</div>
+        <div class="hint">50-day avg ${$c(c.dma50)} · 200-day avg ${$c(c.dma200)} · 52-week ${$c(c.lo52)}–${$c(c.hi52)}</div>
         <div class="ph" style="margin-top:10px">What it means for Indian stocks</div><ul>${c.impact.map(x => `<li>${esc(x)}</li>`).join('')}</ul></div>
       <div><div class="ph">News this week${c.name === 'Gold' ? '' : `: ${esc(c.news_tone)} <span class="hint">(${c.news_pos} pointing up, ${c.news_neg} down, ${c.news.length - c.news_pos - c.news_neg} neutral)</span>`}</div>
         <div class="news"><ul>${c.news.map(x => `<li>${tone(x.tone)}<span class="d">${esc(newsAge(x.date))}</span> <a href="${esc(x.link)}" target="_blank" rel="noopener">${esc(x.title)}</a></li>`).join('') || '<li class="muted">No news found this week.</li>'}</ul></div></div>
     </div>
-    <p class="hint">The range comes from how much Brent has been swinging over the last 3 months. Green/red dots on headlines are a keyword reading of what each implies for the price; headline tone could not be tested on history (no free archive of past oil news), so treat it as context, not a signal.</p></div>`;
+    <p class="hint">${R ? `Price: IBJA (India Bullion and Jewellers Association, Mumbai) 999 rate, the benchmark banks and jewellers use; the 1 week to 3 month changes are IBJA's own rates. Trend, averages, the 1-year change and the range use 10 years of international gold × ₹/$, scaled to the Mumbai level, so rupee moves are included. Jeweller prices add 3% GST and making charges.` : ''} The range comes from how much ${c.name === 'Gold' ? 'gold' : 'Brent'} has been swinging over the last 3 months. Green/red dots on headlines are a keyword reading of what each implies for the price; headline tone could not be tested on history (no free archive of past headlines), so treat it as context, not a signal.</p></div>`;
 }
 function viewMarket() {
   const v = $('#view');

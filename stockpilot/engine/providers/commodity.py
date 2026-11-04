@@ -158,24 +158,114 @@ def gold_news(days: int = 7, limit: int = 10) -> list:
     return out[:limit]
 
 
+IBJA_URL = "https://ibjarates.com/"
+
+
+def ibja_rates(timeout: int = 30) -> dict | None:
+    """Mumbai bullion benchmark from IBJA (India Bullion and Jewellers Association): 999 fine gold, ₹ per 10 g,
+    including import duty, excluding 3% GST. Returns {"last", "date", "session", "hist": [(date, PM rate)]} or None."""
+    import html as _html
+    import json as _json
+    import requests
+    r = requests.get(IBJA_URL, headers={"User-Agent": "Mozilla/5.0 (StockPilot personal research)"}, timeout=timeout)
+    r.raise_for_status()
+    s = r.text
+    m = (re.search(r'id="HdnGold"[^>]*value="([^"]*)"', s) or re.search(r'value="([^"]*)"[^>]*id="HdnGold"', s))
+    hist = []
+    if m:
+        d = _json.loads(_html.unescape(m.group(1)))
+        for lbl, v in zip(d.get("labels", []), d.get("purity999", [])):
+            try:
+                hist.append((dt.datetime.strptime(lbl, "%d/%m/%Y").date(), float(v)))
+            except (TypeError, ValueError):
+                pass
+    # the AM / PM tables carry the newest rates (today's AM can be newer than the last PM in the chart)
+    latest = []
+    for sess in ("AM", "PM"):
+        for dd, v in re.findall(r'data-label="' + sess + r'"><strong>(\d\d/\d\d/\d{4})</strong></td>\s*<td[^>]*data-label="Gold 999">\s*([\d.]+)', s):
+            latest.append((dt.datetime.strptime(dd, "%d/%m/%Y").date(), 1 if sess == "PM" else 0, float(v), sess))
+    hist.sort()
+    if not hist and not latest:
+        return None
+    cands = [(h[0], 1, h[1], "PM") for h in hist[-1:]] + latest
+    day, _, val, sess = max(cands)
+    return {"last": round(val), "date": day.isoformat(), "session": sess, "hist": hist}
+
+
+def _chg(hist, days):
+    """% change of the IBJA rate vs the last rate on or before `days` calendar days earlier."""
+    if not hist:
+        return None
+    end_d, end_v = hist[-1]
+    before = [v for d, v in hist if d <= end_d - dt.timedelta(days=days)]
+    return round((end_v / before[-1] - 1) * 100, 1) if before else None
+
+
 def fetch_gold(prov, usdinr=None) -> dict | None:
+    """Gold in rupees. Headline: IBJA Mumbai rate (999, per 10 g). Trend, averages and range: 10 years of
+    international gold x USD/INR (so rupee moves count), scaled to the IBJA level (the import duty + local premium)."""
     h = prov.history("GC=F", period="10y")
     if h is None or not len(h):
         return None
+    g = h["Close"].copy()
+    try:
+        fxh = prov.history("INR=X", period="10y")["Close"]
+        g.index = g.index.tz_localize(None) if getattr(g.index, "tz", None) else g.index
+        fxh.index = fxh.index.tz_localize(None) if getattr(fxh.index, "tz", None) else fxh.index
+        g.index, fxh.index = g.index.normalize(), fxh.index.normalize()
+        g, fxh = g[~g.index.duplicated(keep="last")], fxh[~fxh.index.duplicated(keep="last")]
+        fx_al = fxh.reindex(g.index).ffill()
+        inr10 = (g * fx_al / 31.1035 * 10).dropna()
+    except Exception as e:
+        print(f"gold in rupees: USD/INR history failed ({e}); using dollar prices")
+        inr10 = None
     try:
         news = gold_news()
     except Exception as e:
         print(f"gold news skipped: {e}")
         news = []
-    o = outlook(h["Close"], None, news)
+    try:
+        ib = ibja_rates()
+    except Exception as e:
+        print(f"IBJA rate skipped: {e}")
+        ib = None
+    impact = ["Rising gold helps: jewellers' inventory (Titan, Kalyan, Senco), gold-loan companies (Muthoot, Manappuram) and holders of gold ETFs/SGBs.",
+              "A gold rally often means investors are nervous (war, inflation, falling rates); it tends to come with a weaker rupee and higher Indian gold import costs."]
+    if inr10 is None or len(inr10) < 260:
+        o = outlook(g, None, news)
+        if o:
+            per10g = lambda usd: round(usd * usdinr / 31.1035 * 10) if usdinr and usd else None
+            o.update({"name": "Gold", "unit": "US$ per troy ounce", "usdinr": usdinr, "inr_unit": "per 10 g", "cur": "$",
+                      "last_inr": per10g(o["last"]), "range_1m_inr": [per10g(o["range_1m"][0]), per10g(o["range_1m"][1])],
+                      "news_tone": "context only", "news_pos": 0, "news_neg": 0, "impact": impact})
+        return o
+    # scale the international rupee price to the Mumbai level using today's IBJA rate (duty + premium, ~constant)
+    k = 1.0
+    if ib and ib.get("last"):
+        ref = inr10[inr10.index.date <= dt.date.fromisoformat(ib["date"])]
+        if len(ref):
+            k = ib["last"] / float(ref.iloc[-1])
+            if not 0.95 <= k <= 1.35:  # a bad scrape: keep the international price rather than a wrong one
+                print(f"IBJA rate {ib['last']} looks off (ratio {k:.2f}); ignoring it")
+                ib, k = None, 1.0
+    o = outlook(inr10 * k, None, news)
     if not o:
         return o
-    per10g = lambda usd: round(usd * usdinr / 31.1035 * 10) if usdinr and usd else None
-    o.update({"name": "Gold", "unit": "US$ per troy ounce", "usdinr": usdinr, "inr_unit": "per 10 g",
-              "last_inr": per10g(o["last"]), "range_1m_inr": [per10g(o["range_1m"][0]), per10g(o["range_1m"][1])],
-              "news_tone": "context only", "news_pos": 0, "news_neg": 0,
-              "impact": ["Rising gold helps: jewellers' inventory (Titan, Kalyan, Senco), gold-loan companies (Muthoot, Manappuram) and holders of gold ETFs/SGBs.",
-                         "A gold rally often means investors are nervous (war, inflation, falling rates); it tends to come with a weaker rupee and higher Indian gold import costs."]})
+    usd_oz = round(float(g.iloc[-1]), 2)
+    o.update({"name": "Gold", "cur": "₹", "unit": "₹ per 10 g, 999 fine", "inr_unit": "per 10 g", "usdinr": usdinr,
+              "usd_oz": usd_oz, "last_inr": None, "range_1m_inr": [None, None], "premium": round((k - 1) * 100, 1),
+              "news_tone": "context only", "news_pos": 0, "news_neg": 0, "impact": impact})
+    o["why"] = [w.replace("$", "₹") for w in o["why"]]
+    if ib:
+        hist = ib["hist"]
+        o.update({"last": ib["last"], "date": ib["date"], "source": "IBJA Mumbai", "session": ib["session"],
+                  "unit": "₹ per 10 g, 999 fine · Mumbai (IBJA), incl. import duty, excl. 3% GST"})
+        for key, days in (("1w", 7), ("1m", 30), ("3m", 91)):
+            c = _chg(hist, days)
+            if c is not None:
+                o["chg"][key] = c
+    else:
+        o.update({"source": "international", "unit": "₹ per 10 g (international price × ₹/$, before import duty and GST)"})
     return o
 
 
